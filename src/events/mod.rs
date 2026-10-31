@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use pumpkin_plugin_api::Player;
 use pumpkin_plugin_api::events::EventPriority;
-use pumpkin_plugin_api::{Context, text::TextComponent};
+use pumpkin_plugin_api::{Context, Server, text::TextComponent};
 
+use crate::auth::PremiumAnchor;
 use crate::state::{AuthState, parse_ip};
 
 /// Registers every handler. All are blocking: we must be able to cancel.
@@ -64,6 +65,34 @@ pub fn on_deauthenticated(state: &AuthState, player: &Player) {
 
     player.set_movement_locked(true);
     send_prompt(state, player);
+}
+
+/// Works out which proof, if any, says this connection is Mojang-authenticated.
+///
+/// Order matters only for the log message: online mode is the stronger claim, and
+/// a forwarded profile is never trusted on its own when it has no textures.
+///
+/// `server.is_online_mode()` is the only network-state getter the v0.1 WIT
+/// exposes; there is no way to ask whether proxy forwarding is actually on.
+pub fn premium_anchor(state: &AuthState, server: &Server, player: &Player) -> PremiumAnchor {
+    let premium = &state.config().premium;
+    if !premium.enabled {
+        return PremiumAnchor::None;
+    }
+
+    if premium.trust_online_mode && server.is_online_mode() {
+        return PremiumAnchor::OnlineMode;
+    }
+
+    if premium.trust_forwarded_profile {
+        // A bare offline server never fills the property list, so this can only be
+        // true when something upstream supplied a real profile.
+        if player.get_skin().is_some() {
+            return PremiumAnchor::ForwardedProfile;
+        }
+    }
+
+    PremiumAnchor::None
 }
 
 /// Sends the single prompt an unauthenticated player needs.

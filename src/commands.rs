@@ -11,6 +11,7 @@ use pumpkin_plugin_api::command::{
 use pumpkin_plugin_api::permission::{Permission, PermissionDefault};
 use pumpkin_plugin_api::{Context, Server, text::TextComponent};
 
+use crate::events::premium_anchor;
 use crate::state::AuthState;
 use crate::storage::lowercase;
 
@@ -21,6 +22,7 @@ pub const PERM_REGISTER: &str = "PMCAuth:command.register";
 pub const PERM_LOGIN: &str = "PMCAuth:command.login";
 pub const PERM_LOGOUT: &str = "PMCAuth:command.logout";
 pub const PERM_CHANGEPASSWORD: &str = "PMCAuth:command.changepassword";
+pub const PERM_PREMIUM: &str = "PMCAuth:command.premium";
 pub const PERM_ADMIN: &str = "PMCAuth:command.admin";
 
 /// Argument keys used in the command trees.
@@ -35,6 +37,8 @@ const ARG_ACTION: &str = "action";
 const ARG_PLAYER: &str = "player";
 
 /// Commands a not-yet-authenticated player is allowed to run.
+///
+/// `/premium` is deliberately absent: linking requires an authenticated account.
 pub const PUBLIC_COMMANDS: &[&str] = &["login", "register"];
 
 /// Returns `true` when `command_line` (e.g. `"/login hunter2"`) may be executed by
@@ -286,6 +290,135 @@ impl pumpkin_plugin_api::commands::CommandHandler for AuthAdminCommand {
     }
 }
 
+// --- /premium and /cracked ------------------------------------------------
+
+/// Links the calling player's own account, reading the trust anchor from the
+/// live connection so a claim can never come from the command itself.
+fn link_own_account(
+    state: &AuthState,
+    server: &Server,
+    player: &pumpkin_plugin_api::Player,
+) -> crate::auth::AuthReply {
+    let anchor = premium_anchor(state, server, player);
+    let has_textures = player.get_skin().is_some();
+    crate::auth::premium_link(
+        state,
+        &player.get_id().to_string(),
+        &player.get_name(),
+        anchor,
+        has_textures,
+    )
+}
+
+struct PremiumCommand(Arc<AuthState>);
+
+impl pumpkin_plugin_api::commands::CommandHandler for PremiumCommand {
+    fn handle(
+        &self,
+        sender: CommandSender,
+        server: Server,
+        _args: ConsumedArgs,
+    ) -> Result<i32, CommandError> {
+        let Some(player) = require_player(&sender, &self.0) else {
+            return Ok(0);
+        };
+
+        let result = link_own_account(&self.0, &server, &player);
+        reply(&sender, &self.0, result);
+        Ok(0)
+    }
+}
+
+struct PremiumOffCommand(Arc<AuthState>);
+
+impl pumpkin_plugin_api::commands::CommandHandler for PremiumOffCommand {
+    fn handle(
+        &self,
+        sender: CommandSender,
+        _server: Server,
+        _args: ConsumedArgs,
+    ) -> Result<i32, CommandError> {
+        let Some(player) = require_player(&sender, &self.0) else {
+            return Ok(0);
+        };
+
+        let result = crate::auth::premium_unlink(&self.0, &player.get_id().to_string());
+        reply(&sender, &self.0, result);
+        Ok(0)
+    }
+}
+
+struct PremiumStatusCommand(Arc<AuthState>);
+
+impl pumpkin_plugin_api::commands::CommandHandler for PremiumStatusCommand {
+    fn handle(
+        &self,
+        sender: CommandSender,
+        _server: Server,
+        _args: ConsumedArgs,
+    ) -> Result<i32, CommandError> {
+        let Some(player) = require_player(&sender, &self.0) else {
+            return Ok(0);
+        };
+
+        let result =
+            crate::auth::premium_status(&self.0, &player.get_id().to_string(), &player.get_name());
+        reply(&sender, &self.0, result);
+        Ok(0)
+    }
+}
+
+/// `/authadmin premium set <player>` — binds the target's *current* session UUID.
+struct AdminPremiumSetCommand(Arc<AuthState>);
+
+impl pumpkin_plugin_api::commands::CommandHandler for AdminPremiumSetCommand {
+    fn handle(
+        &self,
+        sender: CommandSender,
+        server: Server,
+        args: ConsumedArgs,
+    ) -> Result<i32, CommandError> {
+        let Some(target) = string_arg(&args, ARG_PLAYER) else {
+            error(&sender, &self.0, "admin_usage");
+            return Ok(0);
+        };
+
+        // The bound UUID is the connection UUID, so the player has to be online.
+        let Some(player) = server.get_player_by_name(&target) else {
+            error(&sender, &self.0, "premium_admin_requires_online");
+            return Ok(0);
+        };
+
+        let anchor = premium_anchor(&self.0, &server, &player);
+        let has_textures = player.get_skin().is_some();
+        let result =
+            crate::auth::admin_premium_set(&self.0, &lowercase(&target), anchor, has_textures);
+        reply(&sender, &self.0, result);
+        Ok(0)
+    }
+}
+
+/// `/authadmin premium unset <player>` — stored account only, works offline.
+struct AdminPremiumUnsetCommand(Arc<AuthState>);
+
+impl pumpkin_plugin_api::commands::CommandHandler for AdminPremiumUnsetCommand {
+    fn handle(
+        &self,
+        sender: CommandSender,
+        _server: Server,
+        args: ConsumedArgs,
+    ) -> Result<i32, CommandError> {
+        let Some(target) = string_arg(&args, ARG_PLAYER) else {
+            error(&sender, &self.0, "admin_usage");
+            return Ok(0);
+        };
+
+        let result = crate::auth::admin_premium_unset(&self.0, &lowercase(&target));
+        reply(&sender, &self.0, result);
+        Ok(0)
+    }
+}
+
 // --- registration ---------------------------------------------------------
 
 /// Registers the permission nodes the plugin needs.
@@ -297,6 +430,11 @@ pub fn register_permissions(context: &Context) -> pumpkin_plugin_api::Result<()>
         (
             PERM_CHANGEPASSWORD,
             "Allows /changepassword",
+            PermissionDefault::Allow,
+        ),
+        (
+            PERM_PREMIUM,
+            "Allows /premium and /cracked",
             PermissionDefault::Allow,
         ),
         (
@@ -327,6 +465,8 @@ pub fn register_commands(
     context.register_command(build_login(state.clone()), PERM_LOGIN);
     context.register_command(build_logout(state.clone()), PERM_LOGOUT);
     context.register_command(build_change_password(state.clone()), PERM_CHANGEPASSWORD);
+    context.register_command(build_premium(state.clone()), PERM_PREMIUM);
+    context.register_command(build_cracked(state.clone()), PERM_PREMIUM);
     context.register_command(build_auth_admin(state), PERM_ADMIN);
     Ok(())
 }
@@ -367,6 +507,28 @@ fn build_change_password(state: Arc<AuthState>) -> Command {
     command.then(old)
 }
 
+fn build_premium(state: Arc<AuthState>) -> Command {
+    // Each literal branch gets its own handler: the host only records *argument*
+    // nodes in `ConsumedArgs`, so a literal's text is not readable with
+    // `get_value("action")`. Branching inside one handler would see nothing.
+    let command = Command::new(
+        &["premium".to_string()],
+        "Enable premium (Mojang) login for your account",
+    );
+    let command = command.execute(PremiumCommand(state.clone()));
+    let command =
+        command.then(CommandNode::literal("off").execute(PremiumOffCommand(state.clone())));
+    command.then(CommandNode::literal("status").execute(PremiumStatusCommand(state)))
+}
+
+fn build_cracked(state: Arc<AuthState>) -> Command {
+    Command::new(
+        &["cracked".to_string()],
+        "Disable premium login and use your password again",
+    )
+    .execute(PremiumOffCommand(state))
+}
+
 fn build_auth_admin(state: Arc<AuthState>) -> Command {
     let unregister = CommandNode::literal("unregister")
         .then(string_node(ARG_PLAYER).execute(AuthAdminCommand(state.clone())));
@@ -375,13 +537,24 @@ fn build_auth_admin(state: Arc<AuthState>) -> Command {
 
     let set_password = CommandNode::literal("setpassword").then(
         string_node(ARG_PLAYER)
-            .then(string_node(ARG_NEW_PASSWORD).execute(AuthAdminCommand(state))),
+            .then(string_node(ARG_NEW_PASSWORD).execute(AuthAdminCommand(state.clone()))),
     );
+
+    let premium = CommandNode::literal("premium")
+        .then(
+            CommandNode::literal("set")
+                .then(string_node(ARG_PLAYER).execute(AdminPremiumSetCommand(state.clone()))),
+        )
+        .then(
+            CommandNode::literal("unset")
+                .then(string_node(ARG_PLAYER).execute(AdminPremiumUnsetCommand(state))),
+        );
 
     let command = Command::new(&["authadmin".to_string()], "PMCAuth administration");
     let command = command.then(unregister);
     let command = command.then(forcelogin);
-    command.then(set_password)
+    let command = command.then(set_password);
+    command.then(premium)
 }
 
 #[cfg(test)]

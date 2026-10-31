@@ -118,6 +118,43 @@ impl AuthState {
         })
     }
 
+    /// Whether `username_lc` belongs to an account with premium login enabled.
+    ///
+    /// Used to stop a cracked `/register` from claiming a reserved name.
+    pub fn name_is_premium_linked(&self, username_lc: &str) -> bool {
+        self.with_store(|store| {
+            store
+                .get_by_username(username_lc)
+                .is_some_and(|record| record.active_premium_uuid().is_some())
+        })
+    }
+
+    /// The stored account for a joining player, by UUID then by name.
+    ///
+    /// Copies the record out so the caller can reason about it without holding a
+    /// guard across a host call.
+    pub fn account_for(&self, uuid: &str, username: &str) -> Option<crate::storage::UserRecord> {
+        let name_key = lowercase(username);
+        self.with_store(|store| {
+            store
+                .get_by_uuid(uuid)
+                .or_else(|| store.get_by_username(&name_key))
+                .cloned()
+        })
+    }
+
+    /// The blob an auto-login stores in `premium_uuid`, normalized for comparison.
+    ///
+    /// Pumpkin reports UUIDs lowercase with dashes; rejecting anything else keeps a
+    /// hand-edited record from silently never matching.
+    pub fn normalize_uuid(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(trimmed.to_ascii_lowercase())
+    }
+
     // --- login sessions ---------------------------------------------------
 
     pub fn create_session(
@@ -613,6 +650,41 @@ mod tests {
         assert!(state.is_registered("uuid-1", "alice"));
         assert!(state.is_registered("other-uuid", "ALICE"));
         assert!(!state.is_registered("other-uuid", "Bob"));
+    }
+
+    #[test]
+    fn name_is_premium_linked_only_for_linked_accounts() {
+        let state = state();
+        let record =
+            crate::storage::UserRecord::new(0, "Notch", "uuid-1", "hash".to_string(), "ip", 100);
+        state
+            .with_store(|store| store.insert(record))
+            .expect("insert");
+        assert!(
+            !state.name_is_premium_linked("notch"),
+            "a fresh account is not premium"
+        );
+
+        let mut linked = state
+            .with_store(|store| store.get_by_username("notch").cloned())
+            .expect("record");
+        linked.link_premium("premium-uuid", 200);
+        state
+            .with_store(|store| store.update(linked))
+            .expect("update");
+
+        assert!(state.name_is_premium_linked("notch"));
+        assert!(!state.name_is_premium_linked("someone-else"));
+    }
+
+    #[test]
+    fn normalize_uuid_rejects_blank_and_lowercases() {
+        assert_eq!(
+            AuthState::normalize_uuid("  069A79F4-44E9-4726-A5BE-FCA90E38A366 "),
+            Some("069a79f4-44e9-4726-a5be-fca90e38a366".to_string())
+        );
+        assert_eq!(AuthState::normalize_uuid(""), None);
+        assert_eq!(AuthState::normalize_uuid("   "), None);
     }
 
     #[test]

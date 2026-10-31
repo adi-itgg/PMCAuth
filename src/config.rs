@@ -17,6 +17,8 @@ const DEFAULT_CONFIG: &str = include_str!("../config.default.toml");
 pub struct Config {
     pub general: General,
     pub argon2: Argon2Config,
+    /// Premium (Mojang-authenticated) login. Disabled by default.
+    pub premium: Premium,
     /// Messages keyed by language, e.g. `[messages.en]` / `[messages.id]`.
     ///
     /// Written in this nested form on first run. A config written by an older
@@ -115,6 +117,75 @@ pub enum RateLimitScope {
     Ip,
 }
 
+/// Premium login settings.
+///
+/// This feature never talks to Mojang. It only trusts a profile when the server,
+/// or a proxy the operator vouched for, already authenticated that connection.
+/// There is deliberately no timeout, retry, cache or rate-limit setting: those
+/// exist to protect an HTTP call this plugin does not make.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Premium {
+    /// Master switch. `false` means the plugin behaves exactly as it did in 0.2.x.
+    pub enabled: bool,
+    /// Trust a profile the server itself authenticated with Mojang.
+    ///
+    /// Only has any effect when `networking.java.online_mode = true` in the
+    /// server's own `pumpkin.toml`.
+    pub trust_online_mode: bool,
+    /// Trust a profile forwarded by an authenticating proxy.
+    ///
+    /// The plugin cannot read the proxy's state, so this is the operator's
+    /// assertion. It is not sufficient on its own: the profile must also carry a
+    /// `textures` property, which a bare offline server never produces.
+    pub trust_forwarded_profile: bool,
+    /// Require a player to run `/premium` once instead of linking on join.
+    pub require_claim: bool,
+    /// Refuse `/register` for a name already premium-linked in this database.
+    pub block_linked_names: bool,
+    /// Require the `textures` property when relying on a forwarded profile.
+    ///
+    /// Turning this off weakens the only evidence the plugin has. Leave it on.
+    pub link_requires_textures: bool,
+    /// Log the autologin decision for every join: link state, anchor and outcome.
+    pub log_decisions: bool,
+}
+
+impl Default for Premium {
+    fn default() -> Self {
+        Self {
+            // Off by default: a direct offline server must behave exactly as before.
+            enabled: false,
+            trust_online_mode: true,
+            trust_forwarded_profile: false,
+            require_claim: true,
+            block_linked_names: true,
+            link_requires_textures: true,
+            log_decisions: false,
+        }
+    }
+}
+
+impl Premium {
+    /// Normalises the settings and reports whether the feature had to be disabled.
+    ///
+    /// A premium feature with no trust anchor can never authenticate anyone, so it
+    /// is turned off rather than left on to refuse every link in front of players.
+    /// Returns `true` when `enabled` was forced to `false`.
+    fn sanitize(&mut self) -> bool {
+        if self.enabled && !self.trust_online_mode && !self.trust_forwarded_profile {
+            self.enabled = false;
+            return true;
+        }
+        false
+    }
+
+    /// Whether any trust anchor is enabled at all.
+    pub const fn any_anchor_enabled(&self) -> bool {
+        self.trust_online_mode || self.trust_forwarded_profile
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Argon2Config {
@@ -158,6 +229,7 @@ impl Default for Config {
         Self {
             general: General::default(),
             argon2: Argon2Config::default(),
+            premium: Premium::default(),
             messages: builtin_messages(),
         }
     }
@@ -214,6 +286,7 @@ impl Config {
 
         config.general.sanitize();
         config.argon2.sanitize();
+        config.premium.sanitize();
         Ok(config)
     }
 
@@ -347,12 +420,56 @@ const MESSAGES_EN: &[(&str, &str)] = &[
     ("deny_generic", "Please log in before doing that."),
     (
         "admin_usage",
-        "Usage: /authadmin <unregister|forcelogin|setpassword> <player> [password]",
+        "Usage: /authadmin <unregister|forcelogin|setpassword|premium> <player> [password]",
     ),
     ("admin_player_offline", "Player not found."),
     ("admin_unknown_account", "Account not found."),
     ("admin_done", "Done."),
     ("internal_error", "Internal error. Contact an admin."),
+    (
+        "premium_login_success",
+        "Premium login verified. Welcome back!",
+    ),
+    (
+        "premium_status_linked",
+        "Premium login is enabled for this account ({uuid}).",
+    ),
+    (
+        "premium_status_not_linked",
+        "Premium login is not enabled for this account.",
+    ),
+    (
+        "premium_link_success",
+        "Premium login enabled for this account.",
+    ),
+    (
+        "premium_link_already",
+        "Premium login is already enabled for this account.",
+    ),
+    (
+        "premium_unlink_success",
+        "Premium login disabled. Use /login from now on.",
+    ),
+    (
+        "premium_unlink_not_linked",
+        "Premium login is not enabled for this account.",
+    ),
+    (
+        "premium_unavailable",
+        "Premium login is not available on this server. Ask an admin.",
+    ),
+    (
+        "premium_needs_profile",
+        "Premium login needs a verified Minecraft profile. Join through the proxy and try again.",
+    ),
+    (
+        "premium_name_blocked",
+        "That name is reserved by a premium account.",
+    ),
+    (
+        "premium_admin_requires_online",
+        "The player must be online: premium login binds their current session UUID.",
+    ),
 ];
 
 const MESSAGES_ID: &[(&str, &str)] = &[
@@ -386,7 +503,7 @@ const MESSAGES_ID: &[(&str, &str)] = &[
     ("deny_generic", "Login dulu sebelum melakukan itu."),
     (
         "admin_usage",
-        "Usage: /authadmin <unregister|forcelogin|setpassword> <player> [password]",
+        "Usage: /authadmin <unregister|forcelogin|setpassword|premium> <player> [password]",
     ),
     ("admin_player_offline", "Player tidak ditemukan."),
     ("admin_unknown_account", "Akun tidak ditemukan."),
@@ -394,6 +511,50 @@ const MESSAGES_ID: &[(&str, &str)] = &[
     (
         "internal_error",
         "Terjadi kesalahan internal. Hubungi admin.",
+    ),
+    (
+        "premium_login_success",
+        "Login premium terverifikasi. Selamat datang kembali!",
+    ),
+    (
+        "premium_status_linked",
+        "Login premium aktif untuk akun ini ({uuid}).",
+    ),
+    (
+        "premium_status_not_linked",
+        "Login premium tidak aktif untuk akun ini.",
+    ),
+    (
+        "premium_link_success",
+        "Login premium diaktifkan untuk akun ini.",
+    ),
+    (
+        "premium_link_already",
+        "Login premium sudah aktif untuk akun ini.",
+    ),
+    (
+        "premium_unlink_success",
+        "Login premium dimatikan. Mulai sekarang gunakan /login.",
+    ),
+    (
+        "premium_unlink_not_linked",
+        "Login premium tidak aktif untuk akun ini.",
+    ),
+    (
+        "premium_unavailable",
+        "Login premium tidak tersedia di server ini. Hubungi admin.",
+    ),
+    (
+        "premium_needs_profile",
+        "Login premium butuh profil Minecraft terverifikasi. Masuk lewat proxy lalu coba lagi.",
+    ),
+    (
+        "premium_name_blocked",
+        "Nama itu sudah dipakai akun premium.",
+    ),
+    (
+        "premium_admin_requires_online",
+        "Player harus online: login premium mengikat UUID sesi yang sedang berjalan.",
     ),
 ];
 
@@ -490,6 +651,89 @@ rate_limit_scope = "bogus""#
     fn missing_message_falls_back_to_key() {
         let config = Config::default();
         assert_eq!(config.message("does_not_exist", "en"), "does_not_exist");
+    }
+
+    #[test]
+    fn premium_is_disabled_by_default() {
+        // The whole feature must be inert on a default install.
+        let config = Config::default();
+        assert!(!config.premium.enabled);
+        assert!(config.premium.trust_online_mode);
+        assert!(!config.premium.trust_forwarded_profile);
+        assert!(config.premium.require_claim);
+        assert!(config.premium.block_linked_names);
+        assert!(config.premium.link_requires_textures);
+        assert!(!config.premium.log_decisions);
+    }
+
+    #[test]
+    fn premium_without_any_anchor_is_forced_off() {
+        // Enabling the feature with no trust anchor could never authenticate
+        // anyone, so it is turned off instead of refusing every player.
+        let config = Config::parse(
+            r#"
+            [premium]
+            enabled = true
+            trust_online_mode = false
+            trust_forwarded_profile = false
+            "#,
+        )
+        .expect("parse");
+
+        assert!(!config.premium.enabled);
+        assert!(!config.premium.any_anchor_enabled());
+    }
+
+    #[test]
+    fn premium_stays_on_when_one_anchor_is_enabled() {
+        let online = Config::parse(
+            r#"
+            [premium]
+            enabled = true
+            trust_online_mode = true
+            trust_forwarded_profile = false
+            "#,
+        )
+        .expect("parse");
+        assert!(online.premium.enabled);
+
+        // The proxy deployment an operator plans: config only, no recompile.
+        let forwarded = Config::parse(
+            r#"
+            [premium]
+            enabled = true
+            trust_online_mode = false
+            trust_forwarded_profile = true
+            "#,
+        )
+        .expect("parse");
+        assert!(forwarded.premium.enabled);
+    }
+
+    #[test]
+    fn every_premium_message_exists_in_both_languages() {
+        let config = Config::default();
+        for key in [
+            "premium_login_success",
+            "premium_status_linked",
+            "premium_status_not_linked",
+            "premium_link_success",
+            "premium_link_already",
+            "premium_unlink_success",
+            "premium_unlink_not_linked",
+            "premium_unavailable",
+            "premium_needs_profile",
+            "premium_name_blocked",
+            "premium_admin_requires_online",
+        ] {
+            for locale in ["en", "id"] {
+                assert_ne!(
+                    config.message(key, locale),
+                    key,
+                    "missing translation for {key} in {locale}"
+                );
+            }
+        }
     }
 
     #[test]

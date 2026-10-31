@@ -26,6 +26,21 @@ pub struct UserRecord {
     pub registered_at: u64,
     pub last_login: u64,
     pub login_failures: u32,
+    /// Whether this account opted into premium login.
+    ///
+    /// Defaulted so a schema-1 database loads every existing account as cracked.
+    #[serde(default)]
+    pub premium_linked: bool,
+    /// The Mojang-issued UUID the account is bound to.
+    ///
+    /// Deliberately not the same field as [`Self::uuid`]: in offline mode the
+    /// connection UUID is derived from the name, so the two only agree when the
+    /// connection really was authenticated.
+    #[serde(default)]
+    pub premium_uuid: Option<String>,
+    /// Unix timestamp of when the premium link was created.
+    #[serde(default)]
+    pub premium_linked_at: Option<u64>,
 }
 
 impl UserRecord {
@@ -48,7 +63,35 @@ impl UserRecord {
             registered_at: now,
             last_login: now,
             login_failures: 0,
+            premium_linked: false,
+            premium_uuid: None,
+            premium_linked_at: None,
         }
+    }
+
+    /// Binds the account to a Mojang UUID and turns premium login on.
+    pub fn link_premium(&mut self, premium_uuid: &str, now: u64) {
+        self.premium_linked = true;
+        self.premium_uuid = Some(premium_uuid.to_string());
+        self.premium_linked_at = Some(now);
+    }
+
+    /// Drops the premium link, returning the account to the password flow.
+    pub fn unlink_premium(&mut self) {
+        self.premium_linked = false;
+        self.premium_uuid = None;
+        self.premium_linked_at = None;
+    }
+
+    /// The bound UUID, but only while the link is actually active.
+    ///
+    /// Both fields are checked so a half-written record (hand-edited file, or a
+    /// future schema) can never authorise an auto-login.
+    pub fn active_premium_uuid(&self) -> Option<&str> {
+        if !self.premium_linked {
+            return None;
+        }
+        self.premium_uuid.as_deref().filter(|uuid| !uuid.is_empty())
     }
 }
 
@@ -122,5 +165,61 @@ mod tests {
         assert_eq!(record.last_login, 1000);
         assert_eq!(record.registered_ip, "1.2.3.4");
         assert_eq!(record.login_failures, 0);
+    }
+
+    #[test]
+    fn new_record_starts_cracked() {
+        let record = UserRecord::new(1, "Notch", "uuid-1", "hash".into(), "1.2.3.4", 1000);
+        assert!(!record.premium_linked);
+        assert_eq!(record.premium_uuid, None);
+        assert_eq!(record.premium_linked_at, None);
+        assert_eq!(record.active_premium_uuid(), None);
+    }
+
+    #[test]
+    fn link_and_unlink_premium_round_trip() {
+        let mut record =
+            UserRecord::new(1, "Notch", "offline-uuid", "hash".into(), "1.2.3.4", 1000);
+        record.link_premium("premium-uuid", 2000);
+
+        assert!(record.premium_linked);
+        assert_eq!(record.premium_uuid.as_deref(), Some("premium-uuid"));
+        assert_eq!(record.premium_linked_at, Some(2000));
+        assert_eq!(record.active_premium_uuid(), Some("premium-uuid"));
+        // The connection UUID is untouched: it is a different field on purpose.
+        assert_eq!(record.uuid, "offline-uuid");
+
+        record.unlink_premium();
+        assert!(!record.premium_linked);
+        assert_eq!(record.premium_uuid, None);
+        assert_eq!(record.active_premium_uuid(), None);
+    }
+
+    #[test]
+    fn half_written_premium_link_is_not_active() {
+        // Guards against a hand-edited file: `premium_uuid` without the flag, or
+        // the flag with an empty UUID, must never authorise an auto-login.
+        let mut record = UserRecord::new(1, "Notch", "uuid-1", "hash".into(), "1.2.3.4", 1000);
+        record.premium_uuid = Some("premium-uuid".into());
+        assert_eq!(record.active_premium_uuid(), None);
+
+        record.premium_linked = true;
+        record.premium_uuid = Some(String::new());
+        assert_eq!(record.active_premium_uuid(), None);
+    }
+
+    #[test]
+    fn record_without_premium_fields_deserializes_as_cracked() {
+        // Exactly the shape a schema-1 users.json has.
+        let json = r#"{
+            "id": 1, "username": "Notch", "username_lc": "notch", "uuid": "uuid-1",
+            "password_hash": "h", "registered_ip": "i", "last_ip": "i",
+            "registered_at": 1, "last_login": 1, "login_failures": 0
+        }"#;
+
+        let record: UserRecord = serde_json::from_str(json).expect("schema-1 record must load");
+        assert!(!record.premium_linked);
+        assert_eq!(record.premium_uuid, None);
+        assert_eq!(record.active_premium_uuid(), None);
     }
 }

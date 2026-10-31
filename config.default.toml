@@ -41,6 +41,37 @@ memory_kib = 8192
 iterations = 2
 parallelism = 1
 
+# Premium (Mojang-authenticated) login.
+#
+# The plugin NEVER calls the Mojang API. It only trusts a connection that the
+# server, or a proxy you vouched for, already authenticated. Auto-login happens
+# only when ALL of these hold: enabled, the account is linked, the linked UUID
+# equals the connection UUID, and a trust anchor is active. Anything else falls
+# back to the password flow.
+#
+# Default is off, which is exactly the 0.2.x behaviour.
+[premium]
+enabled = false
+# Trust a profile this server authenticated itself.
+# Requires networking.java.online_mode = true in the server's own pumpkin.toml.
+trust_online_mode = true
+# Trust a profile forwarded by an authenticating proxy (Velocity/Vine with
+# signed forwarding and a shared secret). Pumpkin exposes no way to confirm
+# forwarding is on, so this is your assertion. A forwarded profile must also
+# carry a textures property, which a bare offline server never produces.
+trust_forwarded_profile = false
+# true  = each player must run /premium once to link their account.
+# false = link automatically on join while an anchor holds.
+require_claim = true
+# Refuse /register for a name already premium-linked in this database.
+# This is a local check; it does not ask Mojang whether the name exists there.
+block_linked_names = true
+# Require the textures property as evidence when relying on a forwarded profile.
+# Turning this off weakens the only evidence available. Leave it on.
+link_requires_textures = true
+# Log the autologin decision for every join (link state, anchor, outcome).
+log_decisions = false
+
 # Messages are per language. Each player is answered in their own client
 # language; anything without a translation falls back to English.
 #
@@ -71,11 +102,22 @@ kicked_timeout = "Login timed out."
 kicked_bruteforce = "Too many login attempts. Try again later."
 reminder = "You are not logged in. {seconds} seconds left."
 deny_generic = "Please log in before doing that."
-admin_usage = "Usage: /authadmin <unregister|forcelogin|setpassword> <player> [password]"
+admin_usage = "Usage: /authadmin <unregister|forcelogin|setpassword|premium> <player> [password]"
 admin_player_offline = "Player not found."
 admin_unknown_account = "Account not found."
 admin_done = "Done."
 internal_error = "Internal error. Contact an admin."
+premium_login_success = "Premium login verified. Welcome back!"
+premium_status_linked = "Premium login is enabled for this account ({uuid})."
+premium_status_not_linked = "Premium login is not enabled for this account."
+premium_link_success = "Premium login enabled for this account."
+premium_link_already = "Premium login is already enabled for this account."
+premium_unlink_success = "Premium login disabled. Use /login from now on."
+premium_unlink_not_linked = "Premium login is not enabled for this account."
+premium_unavailable = "Premium login is not available on this server. Ask an admin."
+premium_needs_profile = "Premium login needs a verified Minecraft profile. Join through the proxy and try again."
+premium_name_blocked = "That name is reserved by a premium account."
+premium_admin_requires_online = "The player must be online: premium login binds their current session UUID."
 
 [messages.id]
 register_prompt = "Silakan /register <password> <ulangi_password>"
@@ -98,8 +140,19 @@ kicked_timeout = "Waktu login habis."
 kicked_bruteforce = "Terlalu banyak percobaan login. Coba lagi nanti."
 reminder = "Kamu belum login. Sisa waktu {seconds} detik."
 deny_generic = "Login dulu sebelum melakukan itu."
-admin_usage = "Usage: /authadmin <unregister|forcelogin|setpassword> <player> [password]"
+admin_usage = "Usage: /authadmin <unregister|forcelogin|setpassword|premium> <player> [password]"
 admin_player_offline = "Player tidak ditemukan."
 admin_unknown_account = "Akun tidak ditemukan."
 admin_done = "Selesai."
 internal_error = "Terjadi kesalahan internal. Hubungi admin."
+premium_login_success = "Login premium terverifikasi. Selamat datang kembali!"
+premium_status_linked = "Login premium aktif untuk akun ini ({uuid})."
+premium_status_not_linked = "Login premium tidak aktif untuk akun ini."
+premium_link_success = "Login premium diaktifkan untuk akun ini."
+premium_link_already = "Login premium sudah aktif untuk akun ini."
+premium_unlink_success = "Login premium dimatikan. Mulai sekarang gunakan /login."
+premium_unlink_not_linked = "Login premium tidak aktif untuk akun ini."
+premium_unavailable = "Login premium tidak tersedia di server ini. Hubungi admin."
+premium_needs_profile = "Login premium butuh profil Minecraft terverifikasi. Masuk lewat proxy lalu coba lagi."
+premium_name_blocked = "Nama itu sudah dipakai akun premium."
+premium_admin_requires_online = "Player harus online: login premium mengikat UUID sesi yang sedang berjalan."

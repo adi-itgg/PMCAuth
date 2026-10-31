@@ -97,6 +97,8 @@ impl Plugin for PmcAuth {
         let accounts = store.len();
         let state = Arc::new(AuthState::new(config, store));
 
+        report_premium_status(&context, &state);
+
         commands::register_permissions(&context)?;
         commands::register_commands(&context, state.clone())?;
         events::register(&context, state.clone())?;
@@ -122,6 +124,52 @@ impl Plugin for PmcAuth {
             info!("PMCAuth unloaded.");
         }
         Ok(())
+    }
+}
+
+/// Logs which trust anchor premium login will use, so a misconfiguration is
+/// visible at startup instead of only when a player fails to auto-login.
+///
+/// The v0.1 WIT exposes `server.is_online_mode()` and nothing about proxy
+/// forwarding, so `trust_forwarded_profile` can only be reported as an untested
+/// operator assertion, never verified here.
+fn report_premium_status(context: &Context, state: &AuthState) {
+    let premium = &state.config().premium;
+
+    if !premium.enabled {
+        info!("PMCAuth: premium login is disabled (premium.enabled = false).");
+        return;
+    }
+
+    let online_mode = context.get_server().is_online_mode();
+
+    if premium.trust_online_mode {
+        if online_mode {
+            info!("PMCAuth: premium login enabled, anchor: server online mode (active).");
+        } else {
+            warn!(
+                "PMCAuth: premium login enabled with trust_online_mode, but the server is in \
+                 OFFLINE mode. No player can auto-login until online mode is on or a proxy \
+                 anchor is configured."
+            );
+        }
+    }
+
+    if premium.trust_forwarded_profile {
+        if online_mode {
+            info!(
+                "PMCAuth: premium login also trusts forwarded profiles. This is not used while \
+                 the server itself is in online mode."
+            );
+        } else {
+            warn!(
+                "PMCAuth: premium login trusts forwarded profiles (trust_forwarded_profile = \
+                 true), but Pumpkin exposes no way to confirm proxy forwarding is active. The \
+                 plugin still refuses to link an account unless the profile carries a textures \
+                 property. If no authenticating proxy is in front of this server, no link and no \
+                 auto-login can be created."
+            );
+        }
     }
 }
 

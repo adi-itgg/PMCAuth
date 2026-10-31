@@ -8,9 +8,13 @@ JSON file inside the plugin's private data folder; passwords are Argon2id hashes
 
 ## Status
 
-- `cargo build --release` passes, artefact `target/wasm32-wasip2/release/pmc_auth.wasm` (962 KiB / 984,677 bytes).
-- `cargo test --target x86_64-unknown-linux-gnu` — 55 tests pass.
+- `cargo build --release` passes, artefact `target/wasm32-wasip2/release/pmc_auth.wasm` (993 KiB / 1,016,736 bytes).
+- `cargo test --target x86_64-unknown-linux-gnu` — 79 tests pass.
+- `cargo clippy --all-targets --all-features -- -D warnings` is clean.
 - Pinned to a `pumpkin-plugin-api` git rev (WIT `pumpkin:plugin@0.1.0`); see `Cargo.toml`.
+- 0.3.0 adds optional premium login (off by default) and storage schema v2.
+  See [Premium (Mojang) login](#premium-mojang-login) and
+  [Premium login: risks and limits](#premium-login-risks-and-limits).
 
 ## Plugin ABI: v0.1 vs v0.2
 
@@ -157,9 +161,14 @@ login_success = "Login berhasil. Selamat bermain!"
 | `/login <password>` | `PMCAuth:command.login` | everyone |
 | `/logout` | `PMCAuth:command.logout` | everyone |
 | `/changepassword <old> <new>` (alias `/changepw`) | `PMCAuth:command.changepassword` | everyone |
+| `/premium` | `PMCAuth:command.premium` | everyone |
+| `/premium off` (alias `/cracked`) | `PMCAuth:command.premium` | everyone |
+| `/premium status` | `PMCAuth:command.premium` | everyone |
 | `/authadmin unregister <player>` | `PMCAuth:command.admin` | op level 3 |
 | `/authadmin forcelogin <player>` | `PMCAuth:command.admin` | op level 3 |
 | `/authadmin setpassword <player> <password>` | `PMCAuth:command.admin` | op level 3 |
+| `/authadmin premium set <player>` | `PMCAuth:command.admin` | op level 3 |
+| `/authadmin premium unset <player>` | `PMCAuth:command.admin` | op level 3 |
 
 ## What an unauthenticated player cannot do
 
@@ -178,7 +187,7 @@ and `/register`), `PlayerInteractEvent`, `PlayerInteractEntityEvent`,
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "next_id": 2,
   "users": [
     {
@@ -191,11 +200,18 @@ and `/register`), `PlayerInteractEvent`, `PlayerInteractEntityEvent`,
       "last_ip": "203.0.113.7",
       "registered_at": 1793432503,
       "last_login": 1793432503,
-      "login_failures": 0
+      "login_failures": 0,
+      "premium_linked": false,
+      "premium_uuid": null,
+      "premium_linked_at": null
     }
   ]
 }
 ```
+
+`uuid` and `premium_uuid` are different fields on purpose. In offline mode the
+connection UUID is derived from the name (`sha256(name)[..16]`), so the two only
+agree when the connection really was authenticated.
 
 - `username_lc` is the lookup key, so usernames are case-insensitive and unique.
 - Writes go to `<database>.tmp` (e.g. `users.json.tmp`) and are then renamed, so a
@@ -230,6 +246,110 @@ that cheap:
    the sandbox is single-threaded and there is no async password API. Cost is
    configurable in `[argon2]`; the defaults (8 MiB, 2 iterations) keep login
    latency in the low tens of milliseconds.
+
+## Premium (Mojang) login
+
+Optional, **off by default**. A player whose account is linked can join without
+typing a password, while cracked players keep the password flow untouched.
+
+This feature **never calls the Mojang API**. The plugin cannot prove on its own
+that a connection is premium, so it only trusts a connection the server or a
+proxy already authenticated.
+
+### The rule
+
+Auto-login happens only when **all** of these hold. Any single failure drops the
+player into the normal password flow — there is no error path that logs anyone in.
+
+1. `premium.enabled = true`
+2. the account is linked (`premium_linked`)
+3. the stored `premium_uuid` equals the **connection UUID**
+4. a trust anchor is active right now
+
+| Anchor | When it counts | What it proves |
+|---|---|---|
+| Online mode | `server.is_online_mode()` is true, so the host ran the Mojang `hasJoined` handshake for this connection | The UUID is Mojang-issued |
+| Forwarded profile | `trust_forwarded_profile = true` **and** the profile carries a `textures` property | An authenticating proxy supplied a real profile |
+
+A bare offline server produces an empty profile property list, which is why the
+`textures` requirement is what stops a misconfigured `trust_forwarded_profile`
+from silently trusting anything.
+
+### Why the UUID, not the name
+
+In offline mode Pumpkin derives the connection UUID from the player name
+(`offline_uuid(name) = sha256(name)[..16]`). A Mojang UUID is a different value,
+so a linked account can only ever auto-login on a connection whose UUID really
+came from authentication. Binding on the name would instead hand the account to
+whoever connects first with that name.
+
+### Enabling it (proxy deployment)
+
+1. **Install the proxy** in front of Pumpkin (Velocity or Vine) and connect the
+   server only through it. Do not leave the backend port reachable directly.
+2. **Turn on signed forwarding.** In the proxy, enable modern/`player_info`
+   forwarding with a shared secret. In Pumpkin's own `pumpkin.toml`, enable the
+   matching proxy block and set the same secret:
+   ```toml
+   [networking.proxy]
+   enabled = true
+
+   [networking.proxy.velocity]
+   enabled = true
+   secret = "<same secret as the proxy>"
+   ```
+   Velocity also needs `player-info-forwarding-mode = "modern"` and the matching
+   `forwarding.secret` in `velocity.toml`.
+3. **Edit** `plugins/data/PMCAuth/config.toml`:
+   ```toml
+   [premium]
+   enabled = true
+   trust_online_mode = false          # the backend is in offline mode
+   trust_forwarded_profile = true     # you asserted the proxy authenticates
+   require_claim = true
+   link_requires_textures = true
+   ```
+   This is a config-only change. No rebuild, no recompiling the plugin.
+4. **Restart the server** and read the log. PMCAuth prints which anchor it will
+   use, or a warning if the configuration cannot authenticate anyone.
+5. **Link an account.** Join through the proxy with a premium account, run
+   `/login <password>`, then `/premium`. Players who joined before the proxy was
+   installed must link again; a link is bound to a connection UUID.
+6. **Verify**: relog. The player should land unfrozen with the
+   `premium_login_success` message and never see the login prompt.
+
+For a server that itself runs in **online mode** (`networking.java.online_mode =
+true`), skip steps 1–2 and set `trust_online_mode = true`,
+`trust_forwarded_profile = false`.
+
+### Turning it off again
+
+Set `premium.enabled = false` (or `/premium off` per player). Nothing is deleted:
+links stay in `users.json` and simply stop being used. Re-enabling restores them.
+
+### What the plugin cannot do
+
+`server.is_online_mode()` is the only network-state getter in the v0.1 plugin
+WIT. There is **no** API to ask whether proxy forwarding is enabled, whether the
+proxy is authenticating players, or whether a given connection arrived through
+the proxy. `trust_forwarded_profile` is therefore an operator assertion that
+PMCAuth cannot verify; it is only ever trusted together with a `textures`
+property. Check the startup log and test with a real premium account after any
+proxy change.
+
+### Data migration and rollback
+
+The schema went from 1 to 2. The new fields (`premium_linked`, `premium_uuid`,
+`premium_linked_at`) are all optional, so:
+
+- A 0.2.x `users.json` loads unchanged. Every existing account is non-premium.
+- On the first write the file is stamped `"schema_version": 2`. No existing row
+  is rewritten, reordered or dropped.
+- **Rollback** to 0.2.x: stop the server and keep a copy of `users.json` first.
+  Then either restore that copy, or delete the three `premium_*` keys from every
+  user and set `schema_version` back to `1`. A 0.2.x plugin refuses a `2` file
+  rather than misreading accounts, so downgrading without editing the file fails
+  closed instead of losing data.
 
 ## Security notes
 
@@ -341,6 +461,71 @@ a plugin-side redaction becomes possible and this note is obsolete.
 16. Corrupt `users.json` deliberately (`echo garbage > users.json`) → plugin logs the
     parse error and refuses to start rather than wiping accounts.
 
+### Premium login
+
+Run 17–20 first: they prove the feature is inert by default.
+
+17. **Default install.** `premium.enabled = false`. Join, play, relog: behaviour is
+    identical to 0.2.x, and the log says premium login is disabled.
+18. **Upgrade with existing accounts.** Start 0.3.0 against a 0.2.x `users.json`.
+    Accounts load, `/login` works normally, and the file becomes
+    `"schema_version": 2` after the next write. No account is lost.
+19. **Misconfiguration is refused.** On a direct offline server set `enabled = true`,
+    `trust_online_mode = false`, `trust_forwarded_profile = true`. Then `/premium`
+    → refused (`premium_needs_profile`); `/authadmin premium set` → refused; the log
+    warns that no auto-login can happen. Verify this before trusting the feature.
+20. **Cracked path unchanged.** With `enabled = true` and an unlinked account, the
+    player still gets the login prompt and `/login` works exactly as before.
+21. **Premium success auto-login.** Behind the proxy: log in, `/premium`, relog →
+    unfrozen, `premium_login_success`, no password prompt, no login timeout.
+22. **UUID mismatch falls back.** Stop the server, edit `premium_uuid` in
+    `users.json` to a wrong value → relog gives the normal password prompt.
+23. **Anchor unavailable falls back.** With `trust_online_mode = true` but the server
+    in offline mode, a linked account still gets the password prompt.
+24. **`/premium off`.** Run it, relog → password prompt again. `/premium status`
+    reports not linked. `/authadmin premium set <player>` re-links an online player.
+25. **Name reservation.** With an account premium-linked, try `/register` with that
+    name from another client → `premium_name_blocked`. Set
+    `block_linked_names = false` → the block disappears.
+26. **Restart durability.** Restart the server and run `/premium status` → the link
+    is still there and auto-login still works.
+
+## Premium login: risks and limits
+
+Stated plainly, because the feature is only as strong as these assumptions.
+
+1. **The plugin cannot verify proxy forwarding.** Pumpkin's v0.1 WIT exposes
+   `is_online_mode()` and nothing else about the network path. With
+   `trust_forwarded_profile = true` you are asserting that forwarding is on and
+   signed. If it is not, PMCAuth still refuses to link (no `textures` property),
+   but nothing in the plugin can prove the assertion for you.
+2. **Another plugin can forge the signal.** `Player::set_skin` writes the same
+   `textures` property the anchor reads. Any other installed plugin that calls
+   `set_skin` for a cracked player would make the forwarded anchor accept them.
+   Install plugins you trust; this is a real, not theoretical, path.
+3. **Mixed cracked + premium through one proxy is not solved here.** Per-player
+   online mode (a cracked player and a premium player from the same proxy, with
+   the proxy deciding per connection) has not been verified to work with
+   Pumpkin's Velocity/Vine forwarding. Treat that topology as unsupported until
+   you test it end to end. This plugin cannot compensate for it.
+4. **A wrong `trust_online_mode` is silent.** The plugin reads the server's own
+   flag, so if online mode is off, the startup log warns and no auto-login
+   happens. Users simply keep using passwords; nothing breaks, but nothing is
+   gained either.
+5. **Name reservation is local only.** `block_linked_names` stops a cracked
+   `/register` for a name already linked *in this database*. It cannot stop
+   someone registering a name that is premium-owned on Mojang but unknown here,
+   because that would require the Mojang API.
+6. **Not implemented at all:** naming a Mojang-owned name you do not own,
+   per-player online mode, skin/property signature verification, and any Mojang
+   API lookup (no `http.outbound`, no HTTP dependency, no network call in the
+   game loop).
+
+What the feature deliberately does **not** weaken: brute-force lockouts, per-IP
+sessions, single-session handling, the freeze, the login timeout, and the
+"not logged in" guards are untouched. `/premium` is not in `PUBLIC_COMMANDS`, so
+an unauthenticated player cannot link anything.
+
 ## Known gaps
 
 These are platform limits, not unfinished work:
@@ -377,10 +562,14 @@ src/
 │   ├── mod.rs             UserRecord, UserStore trait, StoreError
 │   └── file_store.rs      JSON backend, atomic write, schema versioning
 └── events/
-    ├── mod.rs             Registration + on_authenticated / on_deauthenticated
-    ├── join_leave.rs      Join (freeze, IP session check), leave (cleanup)
+    ├── mod.rs             Registration, on_authenticated, premium anchor probe
+    ├── join_leave.rs      Join (IP session, premium check, freeze), leave (cleanup)
     └── guard.rs           The not-logged-in cancellations
 ```
+
+The premium decision itself lives in `auth.rs` (`autologin_decision`, `can_link`)
+as a pure function over plain data, so the whole security table is unit-tested
+without a server.
 
 `auth.rs` contains no Pumpkin API calls at all, which is what makes the rules
 testable on the host.

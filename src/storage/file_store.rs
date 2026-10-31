@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 use super::{StoreError, UserRecord, UserStore};
 
 /// Bump this and add a branch in [`FileStore::migrate`] when the layout changes.
-const SCHEMA_VERSION: u32 = 1;
+///
+/// v2 added the premium fields on [`UserRecord`]. They are all `#[serde(default)]`,
+/// so the bump is informational: a v1 file would parse either way. It is recorded
+/// so an operator and a rollback both have something unambiguous to check.
+const SCHEMA_VERSION: u32 = 2;
 
 /// On-disk shape. Separate from [`UserRecord`] so the stored format can evolve
 /// independently of the in-memory type.
@@ -78,12 +82,18 @@ impl FileStore {
         Ok(store)
     }
 
-    /// Applies schema upgrades in place. Only version 1 exists so far.
+    /// Applies schema upgrades in place.
     fn migrate(db: &mut Database) -> Result<(), StoreError> {
         match db.schema_version {
             0 => {
                 // Pre-versioned file: assume the v1 layout and stamp it.
                 db.schema_version = SCHEMA_VERSION;
+            }
+            1 => {
+                // v1 -> v2 only adds optional fields. Every existing account keeps
+                // working and loads as non-premium because of `#[serde(default)]`,
+                // so this must not rewrite, reorder or drop anything.
+                db.schema_version = 2;
             }
             SCHEMA_VERSION => {}
             other => {
@@ -373,5 +383,58 @@ mod tests {
         let mut store = FileStore::open(&path).expect("open");
         store.insert(sample("B", "uuid-b")).expect("insert");
         assert_eq!(store.get_by_username("b").map(|u| u.id), Some(8));
+    }
+
+    #[test]
+    fn migrates_v1_database_without_touching_accounts() {
+        // A real 0.2.x file: schema 1, no premium fields anywhere.
+        let dir = TempDir::new("migrate-v1");
+        let path = dir.path().join("users.json");
+        fs::write(
+            &path,
+            r#"{"schema_version":1,"next_id":2,"users":[{"id":1,"username":"Notch","username_lc":"notch","uuid":"uuid-1","password_hash":"$argon2id$hash","registered_ip":"203.0.113.7","last_ip":"203.0.113.9","registered_at":1793432503,"last_login":1793432600,"login_failures":0}]}"#,
+        )
+        .expect("write");
+
+        let mut store = FileStore::open(&path).expect("a v1 file must still load");
+
+        // The account is intact and treated as cracked.
+        let notch = store.get_by_username("notch").expect("account survived");
+        assert_eq!(notch.id, 1);
+        assert_eq!(notch.uuid, "uuid-1");
+        assert_eq!(notch.password_hash, "$argon2id$hash");
+        assert_eq!(notch.registered_at, 1793432503);
+        assert_eq!(notch.last_ip, "203.0.113.9");
+        assert!(!notch.premium_linked);
+        assert_eq!(notch.active_premium_uuid(), None);
+
+        // The bumped version is persisted on the next write.
+        store.insert(sample("Alice", "uuid-2")).expect("insert");
+        let raw = fs::read_to_string(&path).expect("read back");
+        assert!(
+            raw.contains(r#""schema_version":2"#),
+            "the file must be stamped as v2 after a write: {raw}"
+        );
+        assert!(raw.contains("notch"), "the old account must not be dropped");
+    }
+
+    #[test]
+    fn premium_fields_survive_a_reopen() {
+        let dir = TempDir::new("premium-persist");
+        let path = dir.path().join("users.json");
+
+        {
+            let mut store = FileStore::open(&path).expect("open");
+            store.insert(sample("Notch", "uuid-1")).expect("insert");
+            let mut record = store.get_by_uuid("uuid-1").expect("record").clone();
+            record.link_premium("premium-uuid", 4242);
+            store.update(record).expect("update");
+        }
+
+        let reopened = FileStore::open(&path).expect("reopen");
+        let record = reopened.get_by_uuid("uuid-1").expect("record");
+        assert!(record.premium_linked);
+        assert_eq!(record.active_premium_uuid(), Some("premium-uuid"));
+        assert_eq!(record.premium_linked_at, Some(4242));
     }
 }
