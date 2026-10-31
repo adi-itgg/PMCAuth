@@ -148,17 +148,34 @@ impl Default for Config {
 impl Config {
     /// Loads `config.toml` from `dir`, writing the default file first if missing.
     ///
-    /// A malformed file is not fatal: the error is returned so the caller can log
-    /// it, and the caller decides whether to fall back to defaults.
+    /// The file is regenerated in two cases, so the plugin repairs itself instead
+    /// of running on settings nobody can see or edit:
+    /// - missing (deleted by the operator)
+    /// - unparseable, in which case the broken file is kept as
+    ///   `config.toml.broken` so nothing is silently destroyed
+    ///
+    /// The returned error (if any) is still reported to the caller, which may log
+    /// it; after regeneration the caller falls back to built-in defaults.
     pub fn load(dir: &Path) -> Result<Self, ConfigError> {
         let path = dir.join("config.toml");
 
         if !path.exists() {
-            fs::write(&path, DEFAULT_CONFIG).map_err(|e| ConfigError::Io(e.to_string()))?;
+            write_default(&path)?;
+            let raw = fs::read_to_string(&path).map_err(|e| ConfigError::Io(e.to_string()))?;
+            return Self::parse(&raw);
         }
 
         let raw = fs::read_to_string(&path).map_err(|e| ConfigError::Io(e.to_string()))?;
-        Self::parse(&raw)
+        let config = Self::parse(&raw);
+
+        if let Err(error) = &config {
+            // Keep the operator's file for inspection before replacing it.
+            let _ = fs::rename(&path, dir.join("config.toml.broken"));
+            write_default(&path)?;
+            return Err(error.clone());
+        }
+
+        config
     }
 
     /// Parses config TOML, merging built-in messages back in per language.
@@ -180,6 +197,14 @@ impl Config {
         config.general.sanitize();
         config.argon2.sanitize();
         Ok(config)
+    }
+
+    /// Writes the default config to `<dir>/config.toml`.
+    ///
+    /// Used on first run, and to repair a deleted or unparseable file.
+    pub fn write_default(dir: &Path) -> Result<(), ConfigError> {
+        fs::create_dir_all(dir).map_err(|e| ConfigError::Io(e.to_string()))?;
+        write_default(&dir.join("config.toml"))
     }
 
     pub fn database_path(&self, dir: &Path) -> PathBuf {
@@ -323,7 +348,12 @@ const MESSAGES_ID: &[(&str, &str)] = &[
     ("internal_error", "Terjadi kesalahan internal. Hubungi admin."),
 ];
 
-#[derive(Debug)]
+/// Writes [`DEFAULT_CONFIG`] to `path`.
+fn write_default(path: &Path) -> Result<(), ConfigError> {
+    fs::write(path, DEFAULT_CONFIG).map_err(|e| ConfigError::Io(e.to_string()))
+}
+
+#[derive(Debug, Clone)]
 pub enum ConfigError {
     Io(String),
     Parse(String),
@@ -439,6 +469,53 @@ mod tests {
         );
         // Keys the legacy file did not have still resolve.
         assert_eq!(config.message("reminder", "en"), "You are not logged in. {seconds} seconds left.");
+    }
+
+    #[test]
+    fn load_regenerates_a_missing_config() {
+        let dir = temp_dir("missing");
+        let path = dir.join("config.toml");
+        assert!(!path.exists());
+
+        let config = Config::load(&dir).expect("load writes and parses the default");
+
+        assert!(path.exists(), "a deleted config must be recreated");
+        assert_eq!(config.general.database_file, "users.json");
+
+        // Deleting it again after the directory already exists must also work.
+        std::fs::remove_file(&path).expect("remove");
+        Config::load(&dir).expect("second load");
+        assert!(path.exists(), "regenerated on every start, not just the first");
+    }
+
+    #[test]
+    fn load_replaces_a_broken_config_and_keeps_a_copy() {
+        let dir = temp_dir("broken");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "this is not toml [[[").expect("write");
+
+        let result = Config::load(&dir);
+
+        assert!(result.is_err(), "the operator must still be told it was broken");
+        let recovered = std::fs::read_to_string(&path).expect("config rewritten");
+        assert!(
+            recovered.contains("[messages.en]"),
+            "the file is replaced with a working default"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml.broken")).expect("backup kept"),
+            "this is not toml [[[",
+            "the broken file is preserved, never silently destroyed"
+        );
+    }
+
+    /// Unique per test: the suite runs in parallel and must not share a directory.
+    fn temp_dir(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("pmcauth-config-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("temp dir");
+        path
     }
 
     #[test]
