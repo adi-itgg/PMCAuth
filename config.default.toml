@@ -1,0 +1,59 @@
+# PMCAuth configuration.
+# This file is written to <server>/plugins/data/PMCAuth/config.toml on first run.
+# Delete it to regenerate, or edit and restart the server.
+
+[general]
+# User database file, relative to the plugin data folder.
+database_file = "users.json"
+# Seconds a player has to /login or /register before being kicked.
+login_timeout_seconds = 60
+# Seconds between "please log in" reminders. 0 disables reminders.
+reminder_interval_seconds = 10
+# Minutes an IP address stays authenticated. 0 disables IP sessions entirely.
+# WARNING: enable this only if you trust the players sharing an IP (NAT, VPN,
+# families). Everyone behind that IP inherits the session.
+session_minutes = 0
+min_password_length = 6
+max_password_length = 64
+# Failed /login attempts before a temporary lockout.
+max_login_attempts = 3
+# Lockout duration in seconds.
+lockout_seconds = 300
+# true  = kick the player when the login timeout expires.
+# false = keep them frozen and keep re-sending the login prompt.
+kick_on_timeout = true
+
+[argon2]
+# Argon2id cost. Higher is safer but slower; hashing runs on the server's main
+# thread, so raising these hurts login latency for everyone online.
+memory_kib = 8192
+iterations = 2
+parallelism = 1
+
+[messages]
+# Placeholders: {min}, {max}, {seconds}, {player}
+register_prompt = "Silakan /register <password> <ulangi_password>"
+login_prompt = "Silakan /login <password>"
+register_success = "Registrasi berhasil. Selamat bermain!"
+login_success = "Login berhasil. Selamat bermain!"
+# Deliberately identical to not_registered: never reveal whether an account exists.
+login_failed = "Login gagal."
+not_registered = "Login gagal."
+already_registered = "Akun sudah terdaftar."
+already_logged_in = "Kamu sudah login."
+not_logged_in = "Kamu belum login."
+password_too_short = "Password minimal {min} karakter."
+password_too_long = "Password maksimal {max} karakter."
+password_mismatch = "Konfirmasi password tidak cocok."
+password_is_username = "Password tidak boleh sama dengan nama akun."
+logout_success = "Kamu telah logout."
+change_success = "Password berhasil diubah."
+kicked_timeout = "Waktu login habis."
+kicked_bruteforce = "Terlalu banyak percobaan login. Coba lagi nanti."
+reminder = "Kamu belum login. Sisa waktu {seconds} detik."
+deny_generic = "Login dulu sebelum melakukan itu."
+admin_usage = "Usage: /authadmin <unregister|forcelogin|setpassword> <player> [password]"
+admin_player_offline = "Player tidak ditemukan."
+admin_unknown_account = "Akun tidak ditemukan."
+admin_done = "Selesai."
+internal_error = "Terjadi kesalahan internal. Hubungi admin."

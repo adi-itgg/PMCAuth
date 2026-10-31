@@ -1,5 +1,5 @@
 [package]
-name = "PMCAuth"
+name = "pmc_auth"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,8 +7,28 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-# This is the api crate that makes creating plugins easier, and has wit definitions
-pumpkin-plugin-api = "0.2.1+26.3-26.51"
-# Optional: utilities for marketplace licensing and update checking
-#pumpkin-plugin-utils = "0.1.0-dev+26.2-26.45"
+# API crate + WIT definitions provided by the Pumpkin server.
+#
+# Pumpkin ships two plugin ABIs:
+#   v0.1  synchronous exports  (package pumpkin:plugin@0.1.0)
+#   v0.2  async exports        (package pumpkin:plugin@0.2.0)
+# The server has a loader for each (pumpkin-wasm-host-v0_1 / v0_2) and picks one
+# by the package version baked into the component.
+#
+# This crate publishes only the v0.1 ABI. Its WIT is byte-identical to
+# Pumpkin master's crates/pumpkin-plugin-wit/v0.1/*.wit, so it loads on any
+# server that still ships the v0.1 host.
+#
+# 0.1.0-dev+26.2-26.45 -> older WIT (no v-26-3 java version, thinner event records)
+# 0.2.1+26.3-26.51     -> matches current master v0.1 WIT
+pumpkin-plugin-api = "=0.2.1"
 tracing = "0.1"
+# Config file (TOML) and user database (JSON) serialization.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# Argon2id. Pure Rust, so it cross-compiles to wasm32-wasip2 without a C toolchain.
+argon2 = "0.6"
+
+[profile.release]
+lto = true
