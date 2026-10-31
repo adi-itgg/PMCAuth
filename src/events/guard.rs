@@ -18,11 +18,12 @@ use pumpkin_plugin_api::{Context, Player};
 use crate::commands::is_public_command;
 use crate::state::AuthState;
 
-/// Sends the configured "log in first" message.
+/// Sends the configured "log in first" message in the player's language.
 fn deny(state: &AuthState, player: &Player) {
     let config = state.config();
+    let locale = player.get_locale();
     player.send_system_message(
-        TextComponent::text(config.message("deny_generic")),
+        TextComponent::text(config.message("deny_generic", &locale)),
         true,
     );
 }

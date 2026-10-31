@@ -30,13 +30,48 @@ memory_kib = 8192
 iterations = 2
 parallelism = 1
 
-[messages]
-# Placeholders: {min}, {max}, {seconds}, {player}
+# Messages are per language. Each player is answered in their own client
+# language; anything without a translation falls back to English.
+#
+# Supported out of the box: en (default), id.
+# Add a language by copying a block below, e.g. [messages.de], and translating
+# the values. Only the keys you list are overridden -- the rest come from the
+# built-in defaults, so deleting a line is safe.
+#
+# Placeholders: {min}, {max}, {seconds}
+[messages.en]
+register_prompt = "Please /register <password> <repeat_password>"
+login_prompt = "Please /login <password>"
+register_success = "Registration successful. Have fun!"
+login_success = "Login successful. Have fun!"
+# Deliberately identical to not_registered: never reveal whether an account exists.
+login_failed = "Login failed."
+not_registered = "Login failed."
+already_registered = "That account is already registered."
+already_logged_in = "You are already logged in."
+not_logged_in = "You are not logged in."
+password_too_short = "Password must be at least {min} characters."
+password_too_long = "Password must be at most {max} characters."
+password_mismatch = "Password confirmation does not match."
+password_is_username = "Password must not be your username."
+logout_success = "You have been logged out."
+change_success = "Password changed successfully."
+kicked_timeout = "Login timed out."
+kicked_bruteforce = "Too many login attempts. Try again later."
+reminder = "You are not logged in. {seconds} seconds left."
+deny_generic = "Please log in before doing that."
+admin_usage = "Usage: /authadmin <unregister|forcelogin|setpassword> <player> [password]"
+admin_player_offline = "Player not found."
+admin_unknown_account = "Account not found."
+admin_done = "Done."
+internal_error = "Internal error. Contact an admin."
+
+[messages.id]
 register_prompt = "Silakan /register <password> <ulangi_password>"
 login_prompt = "Silakan /login <password>"
 register_success = "Registrasi berhasil. Selamat bermain!"
 login_success = "Login berhasil. Selamat bermain!"
-# Deliberately identical to not_registered: never reveal whether an account exists.
+# Sengaja sama dengan not_registered: jangan bocorkan apakah akun ada.
 login_failed = "Login gagal."
 not_registered = "Login gagal."
 already_registered = "Akun sudah terdaftar."

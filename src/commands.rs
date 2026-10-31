@@ -62,10 +62,15 @@ fn string_arg(args: &ConsumedArgs, key: &str) -> Option<String> {
     }
 }
 
-/// Sends a rendered auth reply to the command sender.
+/// Sends a rendered auth reply to the command sender, in the sender's language.
+///
+/// The console has no locale, so it gets the default language.
 fn reply(sender: &CommandSender, state: &AuthState, message: crate::auth::AuthReply) {
     let config = state.config();
-    sender.send_message(TextComponent::text(&message.render(&config)));
+    let locale = sender
+        .as_player()
+        .map_or_else(String::new, |player| player.get_locale());
+    sender.send_message(TextComponent::text(&message.render(&config, &locale)));
 }
 
 fn error(sender: &CommandSender, state: &AuthState, key: &'static str) {

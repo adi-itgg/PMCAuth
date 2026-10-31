@@ -29,9 +29,9 @@ impl AuthReply {
         Self { key, vars }
     }
 
-    /// Substitutes `{name}` placeholders in the configured message.
-    pub fn render(&self, config: &Config) -> String {
-        let mut text = config.message(self.key).to_string();
+    /// Substitutes `{name}` placeholders in the configured message, in `locale`.
+    pub fn render(&self, config: &Config, locale: &str) -> String {
+        let mut text = config.message(self.key, locale).to_string();
         for (name, value) in &self.vars {
             text = text.replace(&format!("{{{name}}}"), value);
         }
@@ -301,15 +301,24 @@ mod tests {
     fn reply_renders_placeholders() {
         let config = Config::default();
         let reply = AuthReply::with("password_too_short", vec![("min", "8".into())]);
-        assert_eq!(reply.render(&config), "Password minimal 8 karakter.");
+        assert_eq!(reply.render(&config, "id"), "Password minimal 8 karakter.");
+        assert_eq!(
+            reply.render(&config, "en_us"),
+            "Password must be at least 8 characters."
+        );
     }
 
     #[test]
     fn reply_without_vars_renders_configured_message() {
         let config = Config::default();
         assert_eq!(
-            AuthReply::ok("login_success").render(&config),
+            AuthReply::ok("login_success").render(&config, "id"),
             "Login berhasil. Selamat bermain!"
+        );
+        // Unknown locales fall back to English.
+        assert_eq!(
+            AuthReply::ok("login_success").render(&config, "de_de"),
+            "Login successful. Have fun!"
         );
     }
 
@@ -332,10 +341,12 @@ mod tests {
     #[test]
     fn login_failure_message_does_not_reveal_account_existence() {
         let config = Config::default();
-        assert_eq!(
-            AuthReply::fail("login_failed").render(&config),
-            AuthReply::fail("not_registered").render(&config),
-            "a wrong password and a missing account must be indistinguishable"
-        );
+        for locale in ["en", "id", "de_de"] {
+            assert_eq!(
+                AuthReply::fail("login_failed").render(&config, locale),
+                AuthReply::fail("not_registered").render(&config, locale),
+                "a wrong password and a missing account must be indistinguishable ({locale})"
+            );
+        }
     }
 }

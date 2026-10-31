@@ -147,7 +147,8 @@ fn tick(state: &AuthState, server: &Server) {
 
         if config.general.kick_on_timeout {
             state.remove_session(&uuid);
-            kick(&player, config.message("kicked_timeout"));
+            let locale = player.get_locale();
+            kick(&player, config.message("kicked_timeout", &locale));
         } else {
             // Keep them frozen and restart the clock.
             state.remove_session(&uuid);
@@ -177,8 +178,9 @@ fn tick(state: &AuthState, server: &Server) {
                 .map(|s| s.deadline.saturating_sub(now))
                 .unwrap_or(0);
 
+            let locale = player.get_locale();
             let text = config
-                .message("reminder")
+                .message("reminder", &locale)
                 .replace("{seconds}", &remaining.to_string());
             let component = TextComponent::text(&text).color_named(NamedColor::Yellow);
             player.send_system_message(component, true);

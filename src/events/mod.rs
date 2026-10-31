@@ -74,5 +74,6 @@ pub fn send_prompt(state: &AuthState, player: &Player) {
     } else {
         "register_prompt"
     };
-    player.send_system_message(TextComponent::text(config.message(key)), false);
+    let locale = player.get_locale();
+    player.send_system_message(TextComponent::text(config.message(key, &locale)), false);
 }

@@ -34,7 +34,8 @@ fn authenticate_on_join(state: &AuthState, player: &Player) {
         state.remove_session(&uuid);
         state.set_authenticated(&uuid);
         player.set_movement_locked(false);
-        let message = config.message("login_success");
+        let locale = player.get_locale();
+        let message = config.message("login_success", &locale);
         player.send_system_message(TextComponent::text(message), false);
         return;
     }
