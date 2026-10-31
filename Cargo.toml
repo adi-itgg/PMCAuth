@@ -1,6 +1,6 @@
 [package]
 name = "pmc_auth"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2024"
 
 [lib]
@@ -9,19 +9,33 @@ crate-type = ["cdylib"]
 [dependencies]
 # API crate + WIT definitions provided by the Pumpkin server.
 #
-# Pumpkin ships two plugin ABIs:
-#   v0.1  synchronous exports  (package pumpkin:plugin@0.1.0)
-#   v0.2  async exports        (package pumpkin:plugin@0.2.0)
-# The server has a loader for each (pumpkin-wasm-host-v0_1 / v0_2) and picks one
-# by the package version baked into the component.
+# IMPORTANT — Pumpkin ships two plugin ABIs:
+#   v0.1  package pumpkin:plugin@0.1.0  synchronous exports
+#   v0.2  package pumpkin:plugin@0.2.0  async exports
 #
-# This crate publishes only the v0.1 ABI. Its WIT is byte-identical to
-# Pumpkin master's crates/pumpkin-plugin-wit/v0.1/*.wit, so it loads on any
-# server that still ships the v0.1 host.
+# The host picks one from the exported interface name baked into the .wasm --
+# `pumpkin:plugin/metadata@X.Y.Z`, not the package line:
+#     if version.starts_with("0.1.") { V0_1 } else if "0.2." { V0_2 }
+# and then type-checks every export against its own WIT for that version.
 #
-# 0.1.0-dev+26.2-26.45 -> older WIT (no v-26-3 java version, thinner event records)
-# 0.2.1+26.3-26.51     -> matches current master v0.1 WIT
-pumpkin-plugin-api = "=0.2.1"
+# That type check is why the pin must match the *server build*, not just the
+# major version. `+26.3-26.60` is build metadata Cargo ignores, but the server
+# generates its v0.1 linker from its own tree, and the WIT drifted between
+# 26.51 and 26.60: commit f2cff8e6 ("feat(bedrock): port protocol to 1.26.60")
+# added `hand`, `has-passenger-block-data` and `editor-level-migration-version`
+# to records in bedrock-packets.wit. Those reach the `event` type through
+# packet-received-event-data -> serverbound-packet -> s-animate, changing the
+# type hash. The result is a mismatch reported at the first export that takes
+# an `event`:
+#   "Plugin was built against a different iteration of the API:
+#    type-checking export func `handle-event`"
+# (Not a v0.2-async symptom, despite the identical wording.)
+#
+# Pinned to the 26.60 protocol commit, which is what `0.2.1+26.3-26.60` servers
+# build from. Its crates/pumpkin-plugin-wit/v0.1 is identical to canary and
+# nightly HEAD as of 2026-10-31, so this rev also covers the latest servers.
+# Re-pin whenever the server's protocol version moves.
+pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin", rev = "f2cff8e6507a752e219a811d7aca58a8f005b1a2" }
 tracing = "0.1"
 # Config file (TOML) and user database (JSON) serialization.
 serde = { version = "1", features = ["derive"] }

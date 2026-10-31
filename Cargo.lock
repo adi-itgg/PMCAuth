@@ -304,7 +304,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pmc_auth"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "argon2",
  "pumpkin-plugin-api",
@@ -347,9 +347,8 @@ dependencies = [
 
 [[package]]
 name = "pumpkin-plugin-api"
-version = "0.2.1+26.3-26.51"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20a6a0d01590c31f1c55082acac8d23e83b136b056bc44ce2aaff1b18094f5ed"
+version = "0.2.1+26.3-26.60"
+source = "git+https://github.com/Pumpkin-MC/Pumpkin?rev=f2cff8e6507a752e219a811d7aca58a8f005b1a2#f2cff8e6507a752e219a811d7aca58a8f005b1a2"
 dependencies = [
  "postcard",
  "serde_json",
