@@ -12,11 +12,14 @@ use pumpkin_plugin_api::{Context, Server, text::TextComponent};
 use crate::state::AuthState;
 use crate::storage::lowercase;
 
-pub const PERM_REGISTER: &str = "pmcauth:command.register";
-pub const PERM_LOGIN: &str = "pmcauth:command.login";
-pub const PERM_LOGOUT: &str = "pmcauth:command.logout";
-pub const PERM_CHANGEPASSWORD: &str = "pmcauth:command.changepassword";
-pub const PERM_ADMIN: &str = "pmcauth:command.admin";
+// The host rejects a permission whose node does not start with
+// `"{metadata.name}:"`, compared case-sensitively, so the prefix must be
+// "PMCAuth:" exactly -- not the lowercase plugin id.
+pub const PERM_REGISTER: &str = "PMCAuth:command.register";
+pub const PERM_LOGIN: &str = "PMCAuth:command.login";
+pub const PERM_LOGOUT: &str = "PMCAuth:command.logout";
+pub const PERM_CHANGEPASSWORD: &str = "PMCAuth:command.changepassword";
+pub const PERM_ADMIN: &str = "PMCAuth:command.admin";
 
 /// Argument keys used in the command trees.
 ///
@@ -375,6 +378,24 @@ fn build_auth_admin(state: Arc<AuthState>) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permissions_use_the_plugin_namespace() {
+        // `Context::register_permission` rejects any other prefix, case-sensitively.
+        for node in [
+            PERM_REGISTER,
+            PERM_LOGIN,
+            PERM_LOGOUT,
+            PERM_CHANGEPASSWORD,
+            PERM_ADMIN,
+        ] {
+            assert!(
+                node.starts_with(&format!("{}:", crate::PLUGIN_NAME)),
+                "{node} must start with \"{}:\"",
+                crate::PLUGIN_NAME
+            );
+        }
+    }
 
     #[test]
     fn login_and_register_are_public() {

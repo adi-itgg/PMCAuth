@@ -33,6 +33,10 @@ use crate::storage::{FileStore, UserStore};
 /// How often the timeout/reminder task runs, in ticks (20 ticks = 1 second).
 const TICK_PERIOD: u64 = 20;
 
+/// Plugin name reported to the host. It is also the required permission
+/// namespace, so permission nodes must be prefixed with `"PMCAuth:"`.
+pub const PLUGIN_NAME: &str = "PMCAuth";
+
 pub struct PmcAuth {
     state: std::sync::OnceLock<Arc<AuthState>>,
 }
@@ -52,7 +56,7 @@ impl Plugin for PmcAuth {
 
     fn metadata(&self) -> PluginMetadata {
         PluginMetadata {
-            name: "PMCAuth".to_string(),
+            name: PLUGIN_NAME.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             authors: vec!["PMCAuth".to_string()],
             description: "AuthMe-style login and registration for Pumpkin".to_string(),
