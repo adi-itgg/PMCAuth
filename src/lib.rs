@@ -134,6 +134,12 @@ fn start_maintenance_task(context: &Context, state: Arc<AuthState>) {
 }
 
 fn tick(state: &AuthState, server: &Server) {
+    // With nobody pending there is nothing to expire, remind or prune, and this
+    // task runs every second for the life of the process.
+    if state.is_idle() {
+        return;
+    }
+
     let config = state.config();
     let now = now_unix();
 
@@ -196,10 +202,10 @@ fn tick(state: &AuthState, server: &Server) {
 ///
 /// Only used by the maintenance task, where the player may already be gone.
 fn find_player_by_uuid(server: &Server, uuid: &str) -> Option<pumpkin_plugin_api::Player> {
-    server
-        .get_all_players()
-        .into_iter()
-        .find(|player| player.get_id().to_string() == uuid)
+    // The host has a direct lookup; scanning `get_all_players` and reformatting
+    // every UUID was both O(players) and one allocation per player.
+    let uuid = pumpkin_plugin_api::uuid::parse(uuid)?;
+    server.get_player_by_uuid(uuid)
 }
 
 /// Disconnects a player, handling both editions.
@@ -207,7 +213,8 @@ fn find_player_by_uuid(server: &Server, uuid: &str) -> Option<pumpkin_plugin_api
 /// `Player` has no `kick` of its own: it lives on the Java and Bedrock handles.
 fn kick(player: &pumpkin_plugin_api::Player, message: &str) -> bool {
     if let Some(java) = player.as_java() {
-        let options = pumpkin_plugin_api::player::JavaKickOptions::new(TextComponent::text(message));
+        let options =
+            pumpkin_plugin_api::player::JavaKickOptions::new(TextComponent::text(message));
         java.kick(options);
         return true;
     }
@@ -222,7 +229,10 @@ fn kick(player: &pumpkin_plugin_api::Player, message: &str) -> bool {
     }
 
     // Unknown edition: free the slot so the task stops retrying.
-    warn!("PMCAuth: cannot kick player {} (unknown edition)", player.get_name());
+    warn!(
+        "PMCAuth: cannot kick player {} (unknown edition)",
+        player.get_name()
+    );
     false
 }
 

@@ -16,12 +16,23 @@ session_minutes = 0
 min_password_length = 6
 max_password_length = 64
 # Failed /login attempts before a temporary lockout.
+# Also counts attempts that name an account which does not exist, so guessing
+# random usernames cannot burn hashing time for free.
 max_login_attempts = 3
 # Lockout duration in seconds.
 lockout_seconds = 300
 # true  = kick the player when the login timeout expires.
 # false = keep them frozen and keep re-sending the login prompt.
 kick_on_timeout = true
+# What a failed /login attempt counts against.
+#
+# "uuid" = per player connection. Correct on every deployment, and the default.
+#          Weaker: reconnecting gets a fresh counter.
+# "ip"   = additionally per client IP. Stronger, but ONLY valid when the server
+#          sees real client IPs (direct connections, or Velocity/Vine forwarding).
+#          Behind BungeeCord every player shares the proxy's IP, so "ip" would
+#          lock out the whole server on the first typo. Leave it on "uuid" there.
+rate_limit_scope = "uuid"
 
 [argon2]
 # Argon2id cost. Higher is safer but slower; hashing runs on the server's main

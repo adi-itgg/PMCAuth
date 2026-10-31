@@ -4,9 +4,11 @@
 //! returns an [`AuthReply`]. That keeps the rules testable on the host and makes
 //! the command layer a thin translation shell.
 
-use crate::config::Config;
+use std::net::IpAddr;
+
+use crate::config::{Config, RateLimitScope};
 use crate::security::{self, PasswordError};
-use crate::state::{AuthState, now_unix};
+use crate::state::{AuthState, now_unix, parse_ip};
 use crate::storage::{UserRecord, lowercase};
 
 /// A rendered-later message: a config key plus placeholder values.
@@ -18,11 +20,17 @@ pub struct AuthReply {
 
 impl AuthReply {
     pub fn ok(key: &'static str) -> Self {
-        Self { key, vars: Vec::new() }
+        Self {
+            key,
+            vars: Vec::new(),
+        }
     }
 
     pub fn fail(key: &'static str) -> Self {
-        Self { key, vars: Vec::new() }
+        Self {
+            key,
+            vars: Vec::new(),
+        }
     }
 
     pub fn with(key: &'static str, vars: Vec<(&'static str, String)>) -> Self {
@@ -75,7 +83,6 @@ pub fn register(
 
     let name_key = lowercase(username);
 
-    // Cheap existence check before spending Argon2 time.
     let taken = state.with_store(|store| {
         store.get_by_uuid(uuid).is_some() || store.get_by_username(&name_key).is_some()
     });
@@ -107,7 +114,9 @@ pub fn register(
     // Registration counts as authentication.
     state.remove_session(uuid);
     state.set_authenticated(uuid);
-    state.grant_ip_session(ip, now, config.general.session_minutes);
+    if let Some(ip) = parse_ip(ip) {
+        state.grant_ip_session(ip, now, config.general.session_minutes);
+    }
 
     AuthReply::ok("register_success")
 }
@@ -122,7 +131,10 @@ pub fn login(state: &AuthState, uuid: &str, username: &str, ip: &str, password: 
     }
 
     if let Some(remaining) = state.lockout_remaining(uuid, now) {
-        return AuthReply::with("kicked_bruteforce", vec![("seconds", remaining.to_string())]);
+        return AuthReply::with(
+            "kicked_bruteforce",
+            vec![("seconds", remaining.to_string())],
+        );
     }
 
     let name_key = lowercase(username);
@@ -133,17 +145,31 @@ pub fn login(state: &AuthState, uuid: &str, username: &str, ip: &str, password: 
             .cloned()
     });
 
+    let addr = match config.general.rate_limit_scope {
+        RateLimitScope::Ip => parse_ip(ip),
+        RateLimitScope::Uuid => None,
+    };
+
     let Some(record) = record else {
         // Burn the same Argon2 work as a real check so response time does not
         // reveal whether the account exists.
         if let Some(dummy) = state.dummy_hash() {
             security::verify_dummy(state.hasher(), password, dummy);
         }
+        // Count it, or guessing random names forever is free: `record_failure`
+        // below is unreachable when no record exists.
+        state.record_failure(
+            uuid,
+            addr,
+            now,
+            config.general.max_login_attempts,
+            config.general.lockout_seconds,
+        );
         return AuthReply::fail("not_registered");
     };
 
     if !security::verify_password(state.hasher(), password, &record.password_hash) {
-        return record_failure(state, &config, uuid, record);
+        return record_failure(state, config, uuid, record, addr);
     }
 
     let mut record = record;
@@ -153,22 +179,34 @@ pub fn login(state: &AuthState, uuid: &str, username: &str, ip: &str, password: 
     let _ = state.with_store(|store| store.update(record));
 
     state.clear_lockout(uuid);
+    state.clear_failures(uuid, addr);
     state.remove_session(uuid);
     state.set_authenticated(uuid);
-    state.grant_ip_session(ip, now, config.general.session_minutes);
+    if let Some(addr) = parse_ip(ip) {
+        state.grant_ip_session(addr, now, config.general.session_minutes);
+    }
 
     AuthReply::ok("login_success")
 }
 
 /// Counts a failed attempt and locks the account out when the limit is reached.
-fn record_failure(state: &AuthState, config: &Config, uuid: &str, mut record: UserRecord) -> AuthReply {
+fn record_failure(
+    state: &AuthState,
+    config: &Config,
+    uuid: &str,
+    mut record: UserRecord,
+    addr: Option<IpAddr>,
+) -> AuthReply {
     record.login_failures = record.login_failures.saturating_add(1);
-    let failures = record.login_failures;
     let _ = state.with_store(|store| store.update(record));
 
-    if failures >= config.general.max_login_attempts {
-        state.lock(uuid, now_unix(), config.general.lockout_seconds);
-    }
+    state.record_failure(
+        uuid,
+        addr,
+        now_unix(),
+        config.general.max_login_attempts,
+        config.general.lockout_seconds,
+    );
 
     AuthReply::fail("login_failed")
 }
@@ -178,7 +216,9 @@ pub fn logout(state: &AuthState, uuid: &str, ip: &str) -> AuthReply {
     if !state.clear_authenticated(uuid) {
         return AuthReply::fail("not_logged_in");
     }
-    state.revoke_ip_session(ip);
+    if let Some(ip) = parse_ip(ip) {
+        state.revoke_ip_session(ip);
+    }
     AuthReply::ok("logout_success")
 }
 
@@ -247,7 +287,7 @@ pub fn admin_unregister(state: &AuthState, target_lc: &str) -> AuthReply {
 
 /// Marks an existing account as authenticated without a password.
 pub fn admin_force_login(state: &AuthState, uuid: &str, ip: &str) -> AuthReply {
-    let exists = state.with_store(|store| store.get_by_uuid(uuid).is_some());
+    let exists = state.with_store(|store| store.contains_uuid(uuid));
     if !exists {
         return AuthReply::fail("admin_unknown_account");
     }
@@ -255,7 +295,9 @@ pub fn admin_force_login(state: &AuthState, uuid: &str, ip: &str) -> AuthReply {
     state.remove_session(uuid);
     state.clear_lockout(uuid);
     state.set_authenticated(uuid);
-    state.grant_ip_session(ip, now_unix(), state.config().general.session_minutes);
+    if let Some(ip) = parse_ip(ip) {
+        state.grant_ip_session(ip, now_unix(), state.config().general.session_minutes);
+    }
     AuthReply::ok("admin_done")
 }
 

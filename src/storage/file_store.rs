@@ -50,8 +50,8 @@ impl FileStore {
     /// Opens the store, creating the file if it does not exist yet.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let db = if path.exists() {
-            let raw =
-                fs::read_to_string(path).map_err(|e| StoreError::Io(format!("{}: {e}", path.display())))?;
+            let raw = fs::read_to_string(path)
+                .map_err(|e| StoreError::Io(format!("{}: {e}", path.display())))?;
             if raw.trim().is_empty() {
                 Database::default()
             } else {
@@ -114,8 +114,17 @@ impl FileStore {
 
     /// Writes to `<path>.tmp` then renames, so readers never see a partial file.
     fn write_atomic(path: &Path, db: &Database) -> Result<(), StoreError> {
-        let json = serde_json::to_string_pretty(db).map_err(|e| StoreError::Parse(e.to_string()))?;
-        let tmp = path.with_extension("json.tmp");
+        // Compact, not pretty: the file is machine-only, and this is a
+        // row-per-mutation O(total records) rewrite.
+        let json = serde_json::to_string(db).map_err(|e| StoreError::Parse(e.to_string()))?;
+        // Append, do not replace the extension: `database_file` is configurable,
+        // and `with_extension` would turn `users.db` into `users.tmp`, colliding
+        // with an unrelated database in the same folder.
+        let tmp = path.with_file_name({
+            let mut name = path.file_name().unwrap_or_default().to_os_string();
+            name.push(".tmp");
+            name
+        });
 
         fs::write(&tmp, json.as_bytes())
             .map_err(|e| StoreError::Io(format!("{}: {e}", tmp.display())))?;
@@ -151,6 +160,10 @@ impl UserStore for FileStore {
         self.by_uuid
             .get(uuid)
             .and_then(|index| self.db.users.get(*index))
+    }
+
+    fn contains_uuid(&self, uuid: &str) -> bool {
+        self.by_uuid.contains_key(uuid)
     }
 
     fn insert(&mut self, mut record: UserRecord) -> Result<(), StoreError> {
@@ -282,7 +295,10 @@ mod tests {
             store.insert(sample("Notch", "uuid-1")).expect("insert");
             assert_eq!(store.len(), 1);
             assert_eq!(store.get_by_username("notch").map(|u| u.id), Some(1));
-            assert_eq!(store.get_by_uuid("uuid-1").map(|u| u.username.as_str()), Some("Notch"));
+            assert_eq!(
+                store.get_by_uuid("uuid-1").map(|u| u.username.as_str()),
+                Some("Notch")
+            );
         }
 
         let reopened = FileStore::open(&path).expect("reopen");
@@ -295,7 +311,9 @@ mod tests {
         let dir = TempDir::new("dupe");
         let mut store = FileStore::open(&dir.path().join("users.json")).expect("open");
         store.insert(sample("Notch", "uuid-1")).expect("first");
-        let err = store.insert(sample("NOTCH", "uuid-2")).expect_err("must reject");
+        let err = store
+            .insert(sample("NOTCH", "uuid-2"))
+            .expect_err("must reject");
         assert!(matches!(err, StoreError::Duplicate(_)));
     }
 
@@ -304,7 +322,9 @@ mod tests {
         let dir = TempDir::new("dupe-uuid");
         let mut store = FileStore::open(&dir.path().join("users.json")).expect("open");
         store.insert(sample("Alice", "uuid-1")).expect("first");
-        let err = store.insert(sample("Bob", "uuid-1")).expect_err("must reject");
+        let err = store
+            .insert(sample("Bob", "uuid-1"))
+            .expect_err("must reject");
         assert!(matches!(err, StoreError::Duplicate(_)));
     }
 
@@ -324,7 +344,10 @@ mod tests {
         assert!(store.get_by_uuid("uuid-1").is_none());
         assert!(store.get_by_username("alice").is_none());
         // Bob must still resolve after the reindex.
-        assert_eq!(store.get_by_username("bob").map(|u| u.uuid.as_str()), Some("uuid-2"));
+        assert_eq!(
+            store.get_by_username("bob").map(|u| u.uuid.as_str()),
+            Some("uuid-2")
+        );
         assert_eq!(store.len(), 1);
     }
 
@@ -333,7 +356,7 @@ mod tests {
         let dir = TempDir::new("schema");
         let path = dir.path().join("users.json");
         fs::write(&path, r#"{"schema_version":99,"next_id":1,"users":[]}"#).expect("write");
-        let err = FileStore::open(&path).err().expect("must refuse");
+        let err = FileStore::open(&path).expect_err("must refuse to load an unknown schema");
         assert!(matches!(err, StoreError::Parse(_)));
     }
 

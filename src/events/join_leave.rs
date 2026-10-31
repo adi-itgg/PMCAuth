@@ -6,18 +6,20 @@
 
 use std::sync::Arc;
 
-use pumpkin_plugin_api::events::{
-    EventData, EventHandler, PlayerJoinEvent, PlayerLeaveEvent,
-};
+use pumpkin_plugin_api::events::{EventData, EventHandler, PlayerJoinEvent, PlayerLeaveEvent};
 use pumpkin_plugin_api::text::TextComponent;
 use pumpkin_plugin_api::{Player, Server};
 
-use crate::state::{AuthState, now_unix};
+use crate::state::{AuthState, now_unix, parse_ip};
 
 pub struct JoinHandler(pub Arc<AuthState>);
 
 impl EventHandler<PlayerJoinEvent> for JoinHandler {
-    fn handle(&self, _server: Server, event: EventData<PlayerJoinEvent>) -> EventData<PlayerJoinEvent> {
+    fn handle(
+        &self,
+        _server: Server,
+        event: EventData<PlayerJoinEvent>,
+    ) -> EventData<PlayerJoinEvent> {
         authenticate_on_join(&self.0, &event.player);
         event
     }
@@ -30,7 +32,11 @@ fn authenticate_on_join(state: &AuthState, player: &Player) {
     let now = now_unix();
 
     // 1. Same IP within the configured window: skip the password entirely.
-    if config.general.session_minutes > 0 && state.ip_session_valid(&ip, now) {
+    // `get_ip()` yields `ip:port`, so this must compare the bare address.
+    if let Some(addr) = parse_ip(&ip)
+        && config.general.session_minutes > 0
+        && state.ip_session_valid(addr, now)
+    {
         state.remove_session(&uuid);
         state.set_authenticated(&uuid);
         player.set_movement_locked(false);
@@ -57,7 +63,11 @@ fn authenticate_on_join(state: &AuthState, player: &Player) {
 pub struct LeaveHandler(pub Arc<AuthState>);
 
 impl EventHandler<PlayerLeaveEvent> for LeaveHandler {
-    fn handle(&self, _server: Server, event: EventData<PlayerLeaveEvent>) -> EventData<PlayerLeaveEvent> {
+    fn handle(
+        &self,
+        _server: Server,
+        event: EventData<PlayerLeaveEvent>,
+    ) -> EventData<PlayerLeaveEvent> {
         let uuid = event.player.get_id().to_string();
 
         // A player who left while still unauthenticated must not keep a session

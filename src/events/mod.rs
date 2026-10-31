@@ -12,7 +12,7 @@ use pumpkin_plugin_api::Player;
 use pumpkin_plugin_api::events::EventPriority;
 use pumpkin_plugin_api::{Context, text::TextComponent};
 
-use crate::state::AuthState;
+use crate::state::{AuthState, parse_ip};
 
 /// Registers every handler. All are blocking: we must be able to cancel.
 pub fn register(context: &Context, state: Arc<AuthState>) -> pumpkin_plugin_api::Result<()> {
@@ -51,7 +51,9 @@ pub fn on_deauthenticated(state: &AuthState, player: &Player) {
     let ip = player.get_ip();
 
     state.clear_authenticated(&uuid);
-    state.revoke_ip_session(&ip);
+    if let Some(addr) = parse_ip(&ip) {
+        state.revoke_ip_session(addr);
+    }
     state.create_session(
         &uuid,
         &ip,

@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
-use pumpkin_plugin_api::command::{Arg, Command, CommandError, CommandNode, CommandSender, ConsumedArgs};
+use pumpkin_plugin_api::command::{
+    Arg, Command, CommandError, CommandNode, CommandSender, ConsumedArgs,
+};
 use pumpkin_plugin_api::permission::{Permission, PermissionDefault};
 use pumpkin_plugin_api::{Context, Server, text::TextComponent};
 
@@ -70,7 +72,8 @@ fn reply(sender: &CommandSender, state: &AuthState, message: crate::auth::AuthRe
     let locale = sender
         .as_player()
         .map_or_else(String::new, |player| player.get_locale());
-    sender.send_message(TextComponent::text(&message.render(&config, &locale)));
+    let text = message.render(config, &locale);
+    sender.send_message(TextComponent::text(&text));
 }
 
 fn error(sender: &CommandSender, state: &AuthState, key: &'static str) {
@@ -178,8 +181,7 @@ impl pumpkin_plugin_api::commands::CommandHandler for LogoutCommand {
             return Ok(0);
         };
 
-        let result =
-            crate::auth::logout(&self.0, &player.get_id().to_string(), &player.get_ip());
+        let result = crate::auth::logout(&self.0, &player.get_id().to_string(), &player.get_ip());
         let logged_out = result.key == "logout_success";
 
         reply(&sender, &self.0, result);
@@ -317,7 +319,10 @@ pub fn register_permissions(context: &Context) -> pumpkin_plugin_api::Result<()>
 }
 
 /// Builds and registers every command tree.
-pub fn register_commands(context: &Context, state: Arc<AuthState>) -> pumpkin_plugin_api::Result<()> {
+pub fn register_commands(
+    context: &Context,
+    state: Arc<AuthState>,
+) -> pumpkin_plugin_api::Result<()> {
     context.register_command(build_register(state.clone()), PERM_REGISTER);
     context.register_command(build_login(state.clone()), PERM_LOGIN);
     context.register_command(build_logout(state.clone()), PERM_LOGOUT);
@@ -369,9 +374,8 @@ fn build_auth_admin(state: Arc<AuthState>) -> Command {
         .then(string_node(ARG_PLAYER).execute(AuthAdminCommand(state.clone())));
 
     let set_password = CommandNode::literal("setpassword").then(
-        string_node(ARG_PLAYER).then(
-            string_node(ARG_NEW_PASSWORD).execute(AuthAdminCommand(state)),
-        ),
+        string_node(ARG_PLAYER)
+            .then(string_node(ARG_NEW_PASSWORD).execute(AuthAdminCommand(state))),
     );
 
     let command = Command::new(&["authadmin".to_string()], "PMCAuth administration");

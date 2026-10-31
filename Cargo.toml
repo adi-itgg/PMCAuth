@@ -46,3 +46,9 @@ argon2 = "0.6"
 
 [profile.release]
 lto = true
+codegen-units = 1
+# No `catch_unwind` and no panic-based control flow, so unwinding is dead weight.
+panic = "abort"
+strip = true
+# `"s"` over `"z"`: Argon2 is the only CPU-bound loop and it is memory-bound.
+opt-level = "s"

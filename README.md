@@ -6,9 +6,9 @@ JSON file inside the plugin's private data folder; passwords are Argon2id hashes
 
 ## Status
 
-- `cargo build --release` passes, artefact `target/wasm32-wasip2/release/pmc_auth.wasm` (~1.2 MB).
-- `cargo test --target x86_64-unknown-linux-gnu` — 38 tests pass.
-- Pinned to `pumpkin-plugin-api = "=0.2.1"` (WIT `pumpkin:plugin@0.1.0`).
+- `cargo build --release` passes, artefact `target/wasm32-wasip2/release/pmc_auth.wasm` (962 KiB / 984,677 bytes).
+- `cargo test --target x86_64-unknown-linux-gnu` — 55 tests pass.
+- Pinned to a `pumpkin-plugin-api` git rev (WIT `pumpkin:plugin@0.1.0`); see `Cargo.toml`.
 
 ## Plugin ABI: v0.1 vs v0.2
 
@@ -181,8 +181,8 @@ and `/register`), `PlayerInteractEvent`, `PlayerInteractEntityEvent`,
 ```
 
 - `username_lc` is the lookup key, so usernames are case-insensitive and unique.
-- Writes go to `users.json.tmp` and are then renamed, so a crash mid-write cannot
-  truncate the database.
+- Writes go to `<database>.tmp` (e.g. `users.json.tmp`) and are then renamed, so a
+  crash mid-write cannot truncate the database.
 - The whole table is held in memory; lookups are O(1) hashmap hits. This is why
   database access never blocks the game loop.
 - `schema_version` replaces `PRAGMA user_version`. `FileStore::migrate` refuses to

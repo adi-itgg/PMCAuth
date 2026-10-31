@@ -82,6 +82,12 @@ impl std::fmt::Display for StoreError {
 pub trait UserStore: Send + Sync {
     fn get_by_username(&self, username_lc: &str) -> Option<&UserRecord>;
     fn get_by_uuid(&self, uuid: &str) -> Option<&UserRecord>;
+    /// Existence check by UUID, without materialising a record. Defaults to
+    /// `get_by_uuid(..).is_some()` so implementors only override it if the
+    /// lookup alone is cheaper than the record.
+    fn contains_uuid(&self, uuid: &str) -> bool {
+        self.get_by_uuid(uuid).is_some()
+    }
     fn insert(&mut self, record: UserRecord) -> Result<(), StoreError>;
     fn update(&mut self, record: UserRecord) -> Result<(), StoreError>;
     /// Removes the account for `uuid`, returning it if it existed.

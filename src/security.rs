@@ -176,7 +176,10 @@ mod tests {
         let hasher = test_hasher();
         let a = hash_password(&hasher, "same-password").expect("hash a");
         let b = hash_password(&hasher, "same-password").expect("hash b");
-        assert_ne!(a, b, "identical passwords must not produce identical hashes");
+        assert_ne!(
+            a, b,
+            "identical passwords must not produce identical hashes"
+        );
         assert!(verify_password(&hasher, "same-password", &a));
         assert!(verify_password(&hasher, "same-password", &b));
     }

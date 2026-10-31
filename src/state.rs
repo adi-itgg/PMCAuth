@@ -6,7 +6,8 @@
 //! would deadlock.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, RwLock};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use argon2::Argon2;
@@ -28,16 +29,24 @@ pub struct LoginSession {
 
 /// Everything the plugin needs at runtime. Built once in `on_load`, shared via `Arc`.
 pub struct AuthState {
-    config: RwLock<Config>,
+    /// Immutable after `on_load`. Read through a reference so the ~150 heap
+    /// allocations inside `Config` are never re-cloned per call.
+    config: Config,
     store: Mutex<Box<dyn UserStore>>,
     /// Keyed by UUID string.
     sessions: Mutex<HashMap<String, LoginSession>>,
     /// Authenticated players, keyed by UUID string.
     authenticated: Mutex<HashMap<String, ()>>,
-    /// IP -> session expiry (unix seconds).
-    ip_sessions: Mutex<HashMap<String, u64>>,
+    /// Client IP -> session expiry (unix seconds).
+    ip_sessions: Mutex<HashMap<IpAddr, u64>>,
     /// UUID -> locked-until (unix seconds).
     lockouts: Mutex<HashMap<String, u64>>,
+    /// UUID -> consecutive failed `/login` attempts. Separate from
+    /// `UserRecord::login_failures` so a nonexistent account still counts.
+    failures: Mutex<HashMap<String, u32>>,
+    /// IP -> consecutive failed `/login` attempts. Only used when
+    /// `rate_limit_scope = "ip"`.
+    ip_failures: Mutex<HashMap<IpAddr, u32>>,
     hasher: Argon2<'static>,
     dummy_hash: Option<String>,
 }
@@ -48,12 +57,14 @@ impl AuthState {
         let dummy_hash = security::make_dummy_hash(&hasher);
 
         Self {
-            config: RwLock::new(config),
+            config,
             store: Mutex::new(Box::new(store)),
             sessions: Mutex::new(HashMap::new()),
             authenticated: Mutex::new(HashMap::new()),
             ip_sessions: Mutex::new(HashMap::new()),
             lockouts: Mutex::new(HashMap::new()),
+            failures: Mutex::new(HashMap::new()),
+            ip_failures: Mutex::new(HashMap::new()),
             hasher,
             dummy_hash,
         }
@@ -61,18 +72,9 @@ impl AuthState {
 
     // --- config -----------------------------------------------------------
 
-    /// Copies the config out. Never hold the returned clone's lock.
-    pub fn config(&self) -> Config {
-        self.config
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn set_config(&self, config: Config) {
-        if let Ok(mut guard) = self.config.write() {
-            *guard = config;
-        }
+    /// The loaded config. There is no reload path, so this is a plain borrow.
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     // --- hashing ----------------------------------------------------------
@@ -101,6 +103,10 @@ impl AuthState {
         self.with_store(|store| store.flush())
     }
 
+    pub fn contains_uuid(&self, uuid: &str) -> bool {
+        self.with_store(|store| store.contains_uuid(uuid))
+    }
+
     /// Whether an account already exists for this player, by UUID or by name.
     ///
     /// Decides which prompt to send: a registered player needs `/login`, anyone
@@ -108,13 +114,20 @@ impl AuthState {
     pub fn is_registered(&self, uuid: &str, username: &str) -> bool {
         let name_key = lowercase(username);
         self.with_store(|store| {
-            store.get_by_uuid(uuid).is_some() || store.get_by_username(&name_key).is_some()
+            store.contains_uuid(uuid) || store.get_by_username(&name_key).is_some()
         })
     }
 
     // --- login sessions ---------------------------------------------------
 
-    pub fn create_session(&self, uuid: &str, ip: &str, now: u64, timeout_secs: u64, reminder_secs: u64) {
+    pub fn create_session(
+        &self,
+        uuid: &str,
+        ip: &str,
+        now: u64,
+        timeout_secs: u64,
+        reminder_secs: u64,
+    ) {
         let session = LoginSession {
             deadline: now + timeout_secs,
             next_reminder: now + reminder_secs.max(1),
@@ -208,15 +221,15 @@ impl AuthState {
 
     // --- IP sessions ------------------------------------------------------
 
-    pub fn ip_session_valid(&self, ip: &str, now: u64) -> bool {
+    pub fn ip_session_valid(&self, ip: IpAddr, now: u64) -> bool {
         let guard = self
             .ip_sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.get(ip).is_some_and(|expiry| *expiry > now)
+        guard.get(&ip).is_some_and(|expiry| *expiry > now)
     }
 
-    pub fn grant_ip_session(&self, ip: &str, now: u64, minutes: u64) {
+    pub fn grant_ip_session(&self, ip: IpAddr, now: u64, minutes: u64) {
         if minutes == 0 {
             return;
         }
@@ -224,15 +237,50 @@ impl AuthState {
             .ip_sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.insert(ip.to_string(), now + minutes * 60);
+        guard.insert(ip, now + minutes * 60);
     }
 
-    pub fn revoke_ip_session(&self, ip: &str) {
+    pub fn revoke_ip_session(&self, ip: IpAddr) {
         let mut guard = self
             .ip_sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.remove(ip);
+        guard.remove(&ip);
+    }
+
+    /// True when no session, IP session or lockout exists, so the maintenance
+    /// tick has nothing to expire, remind or prune.
+    pub fn is_idle(&self) -> bool {
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !sessions.is_empty() {
+            return false;
+        }
+        let ip_sessions = self
+            .ip_sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !ip_sessions.is_empty() {
+            return false;
+        }
+        let busy = !self
+            .lockouts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+            || !self
+                .failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+            || !self
+                .ip_failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty();
+        !busy
     }
 
     /// Drops expired IP sessions so the map cannot grow without bound.
@@ -280,6 +328,78 @@ impl AuthState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.retain(|_, until| *until > now);
     }
+
+    // --- attempt counting -------------------------------------------------
+
+    /// Counts one failed `/login` for `uuid` and, when `ip` is set, for that
+    /// address too. Locks the account out once the threshold is reached.
+    ///
+    /// Counting the UUID is what closes the unknown-name hole: `login` reaches
+    /// this even when no `UserRecord` exists, so guessing a random name costs
+    /// the same as guessing a wrong password.
+    pub fn record_failure(
+        &self,
+        uuid: &str,
+        ip: Option<IpAddr>,
+        now: u64,
+        max_attempts: u32,
+        lockout_secs: u64,
+    ) {
+        let attempts = {
+            let mut guard = self
+                .failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let count = guard.entry(uuid.to_string()).or_insert(0);
+            *count = count.saturating_add(1);
+            *count
+        };
+
+        let ip_attempts = ip.map(|addr| {
+            let mut guard = self
+                .ip_failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let count = guard.entry(addr).or_insert(0);
+            *count = count.saturating_add(1);
+            *count
+        });
+
+        if attempts >= max_attempts || ip_attempts.is_some_and(|n| n >= max_attempts) {
+            self.lock(uuid, now, lockout_secs);
+        }
+    }
+
+    /// Drops the failure counters for `uuid` and `ip` after a success.
+    pub fn clear_failures(&self, uuid: &str, ip: Option<IpAddr>) {
+        let mut guard = self
+            .failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.remove(uuid);
+        drop(guard);
+
+        if let Some(addr) = ip {
+            let mut guard = self
+                .ip_failures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.remove(&addr);
+        }
+    }
+}
+
+/// Extracts the client IP from what [`pumpkin_plugin_api::Player::get_ip`] returns.
+///
+/// The host forwards `SocketAddr::to_string()`, so the string carries the
+/// client's ephemeral port (`"203.0.113.7:54321"`). Keying sessions on that
+/// whole string never matches across reconnects, and behind a proxy it makes
+/// every player share one key. Sessions are per host, so drop the port.
+///
+/// Returns `None` for anything unparseable; callers then treat IP sessions as
+/// disabled for that player instead of falling back to the raw string.
+pub fn parse_ip(raw: &str) -> Option<IpAddr> {
+    raw.parse::<SocketAddr>().ok().map(|addr| addr.ip())
 }
 
 /// Current unix time in seconds. `SystemTime` maps to `wasi:clocks/wall-clock`
@@ -333,21 +453,139 @@ mod tests {
         assert_eq!(expired, vec!["a".to_string()]);
     }
 
+    fn ip(text: &str) -> IpAddr {
+        text.parse().expect("valid test ip")
+    }
+
+    #[test]
+    fn unknown_name_attempts_lock_out_after_the_threshold() {
+        // Guards K-01: a nonexistent account must still be rate limited, or
+        // spamming `/login <random>` burns an Argon2 verify forever.
+        let state = state();
+        for attempt in 0..3 {
+            assert_eq!(state.lockout_remaining("attacker", 100), None);
+            state.record_failure("attacker", None, 100, 3, 60);
+            if attempt < 2 {
+                assert_eq!(
+                    state.lockout_remaining("attacker", 100),
+                    None,
+                    "must not lock before the threshold"
+                );
+            }
+        }
+        assert_eq!(state.lockout_remaining("attacker", 100), Some(60));
+    }
+
+    #[test]
+    fn success_clears_the_failure_counter() {
+        let state = state();
+        state.record_failure("player", None, 100, 3, 60);
+        state.record_failure("player", None, 100, 3, 60);
+        state.clear_failures("player", None);
+        assert_eq!(state.lockout_remaining("player", 100), None);
+
+        // The counter really restarted: two more attempts is still under the
+        // threshold of three.
+        state.record_failure("player", None, 100, 3, 60);
+        state.record_failure("player", None, 100, 3, 60);
+        assert_eq!(state.lockout_remaining("player", 100), None);
+    }
+
+    #[test]
+    fn ip_scope_counts_across_distinct_uuids() {
+        // What `rate_limit_scope = "ip"` buys: reconnecting with a fresh UUID
+        // does not reset the counter.
+        let state = state();
+        let addr = Some(ip("203.0.113.7"));
+        state.record_failure("uuid-a", addr, 100, 3, 60);
+        state.record_failure("uuid-b", addr, 100, 3, 60);
+        state.record_failure("uuid-c", addr, 100, 3, 60);
+
+        assert!(
+            state.lockout_remaining("uuid-c", 100).is_some(),
+            "the IP counter must lock out the connection that tripped it"
+        );
+    }
+
+    #[test]
+    fn uuid_scope_ignores_the_ip() {
+        // The default scope must not accumulate across players sharing an IP,
+        // which is exactly the BungeeCord footgun.
+        let state = state();
+        state.record_failure("uuid-a", None, 100, 3, 60);
+        state.record_failure("uuid-b", None, 100, 3, 60);
+        state.record_failure("uuid-c", None, 100, 3, 60);
+        assert_eq!(state.lockout_remaining("uuid-c", 100), None);
+    }
+
+    #[test]
+    fn idle_state_short_circuits_the_tick() {
+        let state = state();
+        assert!(state.is_idle(), "a fresh state has nothing to maintain");
+
+        state.create_session("uuid-1", "ip", 100, 60, 10);
+        assert!(!state.is_idle());
+
+        state.remove_session("uuid-1");
+        assert!(state.is_idle());
+
+        state.record_failure("uuid-1", None, 100, 3, 60);
+        assert!(
+            !state.is_idle(),
+            "pending attempt counters must still be pruned"
+        );
+    }
+
     #[test]
     fn ip_session_expires() {
         let state = state();
-        state.grant_ip_session("1.2.3.4", 100, 5);
-        assert!(state.ip_session_valid("1.2.3.4", 200));
-        assert!(!state.ip_session_valid("1.2.3.4", 100 + 5 * 60 + 1));
+        state.grant_ip_session(ip("1.2.3.4"), 100, 5);
+        assert!(state.ip_session_valid(ip("1.2.3.4"), 200));
+        assert!(!state.ip_session_valid(ip("1.2.3.4"), 100 + 5 * 60 + 1));
         state.prune_ip_sessions(100 + 5 * 60 + 1);
-        assert!(!state.ip_session_valid("1.2.3.4", 100 + 5 * 60 + 1));
+        assert!(!state.ip_session_valid(ip("1.2.3.4"), 100 + 5 * 60 + 1));
     }
 
     #[test]
     fn zero_minutes_disables_ip_session() {
         let state = state();
-        state.grant_ip_session("1.2.3.4", 100, 0);
-        assert!(!state.ip_session_valid("1.2.3.4", 101));
+        state.grant_ip_session(ip("1.2.3.4"), 100, 0);
+        assert!(!state.ip_session_valid(ip("1.2.3.4"), 101));
+    }
+
+    #[test]
+    fn parse_ip_strips_the_ephemeral_port() {
+        // What the host actually returns: SocketAddr::to_string().
+        assert_eq!(parse_ip("203.0.113.7:54321"), Some(ip("203.0.113.7")));
+        assert_eq!(parse_ip("203.0.113.7:1"), Some(ip("203.0.113.7")));
+        assert_eq!(parse_ip("[2001:db8::1]:25565"), Some(ip("2001:db8::1")));
+    }
+
+    #[test]
+    fn parse_ip_rejects_anything_unparseable() {
+        // A bare IP has no port, so it is not a SocketAddr and must not leak
+        // through as a session key.
+        assert_eq!(parse_ip("203.0.113.7"), None);
+        assert_eq!(parse_ip(""), None);
+        assert_eq!(parse_ip("not an address"), None);
+        assert_eq!(parse_ip("1.2.3.4:"), None);
+    }
+
+    #[test]
+    fn ip_session_survives_a_new_source_port() {
+        // The regression this guards: every reconnect uses a new ephemeral
+        // port, so a session keyed on `ip:port` never matches.
+        let state = state();
+        let first = parse_ip("203.0.113.7:54321").expect("connect from port 54321");
+        let reconnect = parse_ip("203.0.113.7:60001").expect("reconnect from port 60001");
+
+        state.grant_ip_session(first, 100, 5);
+        assert!(
+            state.ip_session_valid(reconnect, 110),
+            "a reconnect from the same host must reuse the session"
+        );
+        state.revoke_ip_session(reconnect);
+        assert!(!state.ip_session_valid(first, 110));
     }
 
     #[test]
@@ -367,7 +605,9 @@ mod tests {
 
         let record =
             crate::storage::UserRecord::new(0, "Alice", "uuid-1", "hash".to_string(), "ip", 100);
-        state.with_store(|store| store.insert(record)).expect("insert");
+        state
+            .with_store(|store| store.insert(record))
+            .expect("insert");
 
         assert!(state.is_registered("uuid-1", "Alice"));
         assert!(state.is_registered("uuid-1", "alice"));
@@ -390,5 +630,4 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AuthState>();
     }
-
 }

@@ -96,6 +96,23 @@ pub struct General {
     pub lockout_seconds: u64,
     /// Whether a timeout kicks the player or only re-prompts them.
     pub kick_on_timeout: bool,
+    /// What a failed or unknown-name `/login` attempt counts against.
+    ///
+    /// `"uuid"` (default) is correct on every deployment. `"ip"` is stronger
+    /// but only valid behind Velocity/Vine-style forwarding; behind BungeeCord
+    /// every player shares one IP and the whole server would be locked out.
+    pub rate_limit_scope: RateLimitScope,
+}
+
+/// Scope of the unknown-name / failed-login failure counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RateLimitScope {
+    /// Count per player connection. Safe everywhere.
+    #[default]
+    Uuid,
+    /// Count per client IP, in addition to per UUID. Topology-dependent.
+    Ip,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +136,7 @@ impl Default for General {
             max_login_attempts: 3,
             lockout_seconds: 300,
             kick_on_timeout: true,
+            rate_limit_scope: RateLimitScope::default(),
         }
     }
 }
@@ -288,13 +306,14 @@ fn builtin_messages() -> HashMap<String, BTreeMap<String, String>> {
 ///
 /// English is the default; Indonesian is built in too. Both are always merged
 /// into the loaded config, so a missing or deleted key still resolves.
-const BUILTIN_MESSAGES: &[(&str, &[(&str, &str)])] = &[
-    (DEFAULT_LANGUAGE, MESSAGES_EN),
-    ("id", MESSAGES_ID),
-];
+const BUILTIN_MESSAGES: &[(&str, &[(&str, &str)])] =
+    &[(DEFAULT_LANGUAGE, MESSAGES_EN), ("id", MESSAGES_ID)];
 
 const MESSAGES_EN: &[(&str, &str)] = &[
-    ("register_prompt", "Please /register <password> <repeat_password>"),
+    (
+        "register_prompt",
+        "Please /register <password> <repeat_password>",
+    ),
     ("login_prompt", "Please /login <password>"),
     ("register_success", "Registration successful. Have fun!"),
     ("login_success", "Login successful. Have fun!"),
@@ -304,17 +323,32 @@ const MESSAGES_EN: &[(&str, &str)] = &[
     ("already_registered", "That account is already registered."),
     ("already_logged_in", "You are already logged in."),
     ("not_logged_in", "You are not logged in."),
-    ("password_too_short", "Password must be at least {min} characters."),
-    ("password_too_long", "Password must be at most {max} characters."),
+    (
+        "password_too_short",
+        "Password must be at least {min} characters.",
+    ),
+    (
+        "password_too_long",
+        "Password must be at most {max} characters.",
+    ),
     ("password_mismatch", "Password confirmation does not match."),
-    ("password_is_username", "Password must not be your username."),
+    (
+        "password_is_username",
+        "Password must not be your username.",
+    ),
     ("logout_success", "You have been logged out."),
     ("change_success", "Password changed successfully."),
     ("kicked_timeout", "Login timed out."),
-    ("kicked_bruteforce", "Too many login attempts. Try again later."),
+    (
+        "kicked_bruteforce",
+        "Too many login attempts. Try again later.",
+    ),
     ("reminder", "You are not logged in. {seconds} seconds left."),
     ("deny_generic", "Please log in before doing that."),
-    ("admin_usage", "Usage: /authadmin <unregister|forcelogin|setpassword> <player> [password]"),
+    (
+        "admin_usage",
+        "Usage: /authadmin <unregister|forcelogin|setpassword> <player> [password]",
+    ),
     ("admin_player_offline", "Player not found."),
     ("admin_unknown_account", "Account not found."),
     ("admin_done", "Done."),
@@ -322,7 +356,10 @@ const MESSAGES_EN: &[(&str, &str)] = &[
 ];
 
 const MESSAGES_ID: &[(&str, &str)] = &[
-    ("register_prompt", "Silakan /register <password> <ulangi_password>"),
+    (
+        "register_prompt",
+        "Silakan /register <password> <ulangi_password>",
+    ),
     ("login_prompt", "Silakan /login <password>"),
     ("register_success", "Registrasi berhasil. Selamat bermain!"),
     ("login_success", "Login berhasil. Selamat bermain!"),
@@ -334,18 +371,30 @@ const MESSAGES_ID: &[(&str, &str)] = &[
     ("password_too_short", "Password minimal {min} karakter."),
     ("password_too_long", "Password maksimal {max} karakter."),
     ("password_mismatch", "Konfirmasi password tidak cocok."),
-    ("password_is_username", "Password tidak boleh sama dengan nama akun."),
+    (
+        "password_is_username",
+        "Password tidak boleh sama dengan nama akun.",
+    ),
     ("logout_success", "Kamu telah logout."),
     ("change_success", "Password berhasil diubah."),
     ("kicked_timeout", "Waktu login habis."),
-    ("kicked_bruteforce", "Terlalu banyak percobaan login. Coba lagi nanti."),
+    (
+        "kicked_bruteforce",
+        "Terlalu banyak percobaan login. Coba lagi nanti.",
+    ),
     ("reminder", "Kamu belum login. Sisa waktu {seconds} detik."),
     ("deny_generic", "Login dulu sebelum melakukan itu."),
-    ("admin_usage", "Usage: /authadmin <unregister|forcelogin|setpassword> <player> [password]"),
+    (
+        "admin_usage",
+        "Usage: /authadmin <unregister|forcelogin|setpassword> <player> [password]",
+    ),
     ("admin_player_offline", "Player tidak ditemukan."),
     ("admin_unknown_account", "Akun tidak ditemukan."),
     ("admin_done", "Selesai."),
-    ("internal_error", "Terjadi kesalahan internal. Hubungi admin."),
+    (
+        "internal_error",
+        "Terjadi kesalahan internal. Hubungi admin.",
+    ),
 ];
 
 /// Writes [`DEFAULT_CONFIG`] to `path`.
@@ -406,6 +455,38 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_scope_defaults_to_uuid_and_parses_both_spellings() {
+        // Per-UUID is the only scope that is safe on an unknown topology.
+        assert_eq!(
+            Config::default().general.rate_limit_scope,
+            RateLimitScope::Uuid
+        );
+
+        let uuid = Config::parse(
+            r#"[general]
+rate_limit_scope = "uuid""#,
+        )
+        .expect("uuid scope parses");
+        assert_eq!(uuid.general.rate_limit_scope, RateLimitScope::Uuid);
+
+        let ip = Config::parse(
+            r#"[general]
+rate_limit_scope = "ip""#,
+        )
+        .expect("ip scope parses");
+        assert_eq!(ip.general.rate_limit_scope, RateLimitScope::Ip);
+
+        // A typo must be a parse error, not a silent fallback to the weaker scope.
+        assert!(
+            Config::parse(
+                r#"[general]
+rate_limit_scope = "bogus""#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn missing_message_falls_back_to_key() {
         let config = Config::default();
         assert_eq!(config.message("does_not_exist", "en"), "does_not_exist");
@@ -425,15 +506,27 @@ mod tests {
         assert_eq!(language_of("de_de"), "en");
         assert_eq!(language_of(""), "en");
 
-        assert_eq!(config.message("login_success", "id_id"), "Login berhasil. Selamat bermain!");
-        assert_eq!(config.message("login_success", "en_us"), "Login successful. Have fun!");
-        assert_eq!(config.message("login_success", "de_de"), "Login successful. Have fun!");
+        assert_eq!(
+            config.message("login_success", "id_id"),
+            "Login berhasil. Selamat bermain!"
+        );
+        assert_eq!(
+            config.message("login_success", "en_us"),
+            "Login successful. Have fun!"
+        );
+        assert_eq!(
+            config.message("login_success", "de_de"),
+            "Login successful. Have fun!"
+        );
     }
 
     #[test]
     fn every_builtin_language_defines_every_key() {
         let config = Config::default();
-        let english = config.messages.get(DEFAULT_LANGUAGE).expect("english built in");
+        let english = config
+            .messages
+            .get(DEFAULT_LANGUAGE)
+            .expect("english built in");
 
         for language in config.messages.keys() {
             let messages = &config.messages[language];
@@ -468,7 +561,10 @@ mod tests {
             "Login berhasil. Selamat bermain!"
         );
         // Keys the legacy file did not have still resolve.
-        assert_eq!(config.message("reminder", "en"), "You are not logged in. {seconds} seconds left.");
+        assert_eq!(
+            config.message("reminder", "en"),
+            "You are not logged in. {seconds} seconds left."
+        );
     }
 
     #[test]
@@ -485,7 +581,10 @@ mod tests {
         // Deleting it again after the directory already exists must also work.
         std::fs::remove_file(&path).expect("remove");
         Config::load(&dir).expect("second load");
-        assert!(path.exists(), "regenerated on every start, not just the first");
+        assert!(
+            path.exists(),
+            "regenerated on every start, not just the first"
+        );
     }
 
     #[test]
@@ -496,7 +595,10 @@ mod tests {
 
         let result = Config::load(&dir);
 
-        assert!(result.is_err(), "the operator must still be told it was broken");
+        assert!(
+            result.is_err(),
+            "the operator must still be told it was broken"
+        );
         let recovered = std::fs::read_to_string(&path).expect("config rewritten");
         assert!(
             recovered.contains("[messages.en]"),
