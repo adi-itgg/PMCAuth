@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build wasm32-wasip2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # .cargo/config.toml pins this target, so no --target flag is needed below.
+          targets: wasm32-wasip2
+
+      - run: cargo fetch --locked
+      - run: cargo build --release --locked
+
+      # Fail on the real cause if the target pin in .cargo/config.toml ever disappears:
+      # the build would otherwise succeed against the host triple and emit no plugin.
+      - run: test -f target/wasm32-wasip2/release/pmc_auth.wasm

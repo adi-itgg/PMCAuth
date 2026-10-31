@@ -1,5 +1,7 @@
 # PMCAuth
 
+[![CI](https://github.com/adi-itgg/PMCAuth/actions/workflows/ci.yml/badge.svg?branch=main&label=build)](https://github.com/adi-itgg/PMCAuth/actions/workflows/ci.yml)
+
 AuthMe-style authentication plugin for [Pumpkin MC](https://github.com/Pumpkin-MC/Pumpkin).
 Players must `/register` or `/login` before they can play. Accounts are stored in a
 JSON file inside the plugin's private data folder; passwords are Argon2id hashes.
