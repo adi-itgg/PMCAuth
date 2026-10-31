@@ -33,19 +33,10 @@ pub fn register(context: &Context, state: Arc<AuthState>) -> pumpkin_plugin_api:
 
 /// Called after a successful register/login/forcelogin.
 ///
-/// Clears the freeze, drops the pending session and tells the player.
+/// Clears the freeze and drops the pending session. It deliberately sends no
+/// message: every caller has already replied with its own success text, and
+/// sending here as well made the player see "Login berhasil" twice.
 pub fn on_authenticated(state: &AuthState, player: &Player) {
-    let config = state.config();
-    let message = config.message("login_success");
-    on_authenticated_silently(state, player);
-    player.send_system_message(TextComponent::text(message), false);
-}
-
-/// The state part of [`on_authenticated`], without the success message.
-///
-/// Used by `/authadmin forcelogin`, where the operator already gets a reply and
-/// the target should not also see "login successful".
-pub fn on_authenticated_silently(state: &AuthState, player: &Player) {
     let uuid = player.get_id().to_string();
 
     state.remove_session(&uuid);

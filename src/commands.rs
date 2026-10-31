@@ -260,10 +260,8 @@ impl pumpkin_plugin_api::commands::CommandHandler for AuthAdminCommand {
                     &player.get_ip(),
                 );
                 reply(&sender, &self.0, result.clone());
-                // Unfreeze the target, but stay silent: `admin_done` already
-                // answered the operator and the target gets no success nag.
                 if result.key == "admin_done" {
-                    crate::events::on_authenticated_silently(&self.0, &player);
+                    crate::events::on_authenticated(&self.0, &player);
                 }
             }
             "setpassword" => {
