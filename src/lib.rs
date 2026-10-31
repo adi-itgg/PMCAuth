@@ -159,7 +159,7 @@ fn tick(state: &AuthState, server: &Server) {
                 config.general.reminder_interval_seconds,
             );
             player.set_movement_locked(true);
-            crate::events::send_prompt(&config, &player);
+            crate::events::send_prompt(state, &player);
         }
     }
 

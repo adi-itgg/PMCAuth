@@ -50,7 +50,7 @@ fn authenticate_on_join(state: &AuthState, player: &Player) {
     );
 
     player.set_movement_locked(true);
-    crate::events::send_prompt(&config, player);
+    crate::events::send_prompt(state, player);
 }
 
 pub struct LeaveHandler(pub Arc<AuthState>);

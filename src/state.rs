@@ -13,7 +13,7 @@ use argon2::Argon2;
 
 use crate::config::Config;
 use crate::security;
-use crate::storage::{FileStore, UserStore};
+use crate::storage::{FileStore, UserStore, lowercase};
 
 /// A player who is currently connected but has not authenticated yet.
 #[derive(Debug, Clone)]
@@ -99,6 +99,17 @@ impl AuthState {
 
     pub fn flush_store(&self) -> Result<(), crate::storage::StoreError> {
         self.with_store(|store| store.flush())
+    }
+
+    /// Whether an account already exists for this player, by UUID or by name.
+    ///
+    /// Decides which prompt to send: a registered player needs `/login`, anyone
+    /// else needs `/register`.
+    pub fn is_registered(&self, uuid: &str, username: &str) -> bool {
+        let name_key = lowercase(username);
+        self.with_store(|store| {
+            store.get_by_uuid(uuid).is_some() || store.get_by_username(&name_key).is_some()
+        })
     }
 
     // --- login sessions ---------------------------------------------------
@@ -347,6 +358,21 @@ mod tests {
         assert_eq!(state.lockout_remaining("uuid-1", 161), None);
         state.prune_lockouts(161);
         assert_eq!(state.lockout_remaining("uuid-1", 161), None);
+    }
+
+    #[test]
+    fn is_registered_matches_uuid_and_case_insensitive_name() {
+        let state = state();
+        assert!(!state.is_registered("uuid-1", "Alice"));
+
+        let record =
+            crate::storage::UserRecord::new(0, "Alice", "uuid-1", "hash".to_string(), "ip", 100);
+        state.with_store(|store| store.insert(record)).expect("insert");
+
+        assert!(state.is_registered("uuid-1", "Alice"));
+        assert!(state.is_registered("uuid-1", "alice"));
+        assert!(state.is_registered("other-uuid", "ALICE"));
+        assert!(!state.is_registered("other-uuid", "Bob"));
     }
 
     #[test]
