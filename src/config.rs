@@ -12,9 +12,67 @@ use serde::{Deserialize, Serialize};
 /// Default `config.toml` contents written on first run.
 const DEFAULT_CONFIG: &str = include_str!("../config.default.toml");
 
+/// Version of the config layout the plugin currently understands.
+///
+/// Bump this whenever a key is added to [`DEFAULT_CONFIG`] so existing files get
+/// it merged in on the next start. A file without `config_version` is treated as
+/// version 0, which is every config written before 0.3.1.
+pub const CONFIG_VERSION: u32 = 1;
+
+/// Key holding the config version. It is merged silently when missing.
+const VERSION_KEY: &str = "config_version";
+
+/// Marker comment that precedes a key operators should not delete.
+///
+/// When such a key is missing, the migration copies the marker *and* the key, so
+/// the regenerated section still explains itself.
+const AUTO_MARKER: &str = "@pmcauto";
+
+/// What a load did to the file on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigMigration {
+    /// The file was already current. Nothing was written.
+    UpToDate,
+    /// Keys were added (and/or the version moved forward). The file was rewritten.
+    Written { from: u32, to: u32, added: usize },
+    /// The file did not parse. It was kept as `config.toml.broken` and replaced
+    /// by a fresh default, so the server still runs on known settings.
+    ReplacedBroken { detail: String },
+}
+
+impl ConfigMigration {
+    /// Whether the file on disk changed.
+    pub const fn wrote(&self) -> bool {
+        matches!(self, Self::Written { .. } | Self::ReplacedBroken { .. })
+    }
+}
+
+/// Why a load could not produce a config at all.
+///
+/// A *broken* file is reported through [`ConfigMigration::ReplacedBroken`]
+/// instead, because it still yields a usable config.
+#[derive(Debug, Clone)]
+pub enum LoadError {
+    Io(String),
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "config io error: {e}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Version of the on-disk layout this file was written with.
+    ///
+    /// Serialised so a rewrite keeps it. Migration compares the *document* in
+    /// [`Config::migrate`], not this field, because a missing key must be
+    /// distinguishable from a hand-written zero.
+    pub config_version: u32,
     pub general: General,
     pub argon2: Argon2Config,
     /// Premium (Mojang-authenticated) login. Disabled by default.
@@ -227,6 +285,7 @@ impl Default for Argon2Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            config_version: 0,
             general: General::default(),
             argon2: Argon2Config::default(),
             premium: Premium::default(),
@@ -236,36 +295,96 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Loads `config.toml` from `dir`, writing the default file first if missing.
+    /// Loads `config.toml` from `dir`, migrating it forward when needed.
     ///
-    /// The file is regenerated in two cases, so the plugin repairs itself instead
-    /// of running on settings nobody can see or edit:
-    /// - missing (deleted by the operator)
-    /// - unparseable, in which case the broken file is kept as
-    ///   `config.toml.broken` so nothing is silently destroyed
+    /// The file is repaired in three cases, so the plugin never runs on settings
+    /// nobody can see or edit:
+    /// - missing -- written from [`DEFAULT_CONFIG`]
+    /// - unparseable -- kept as `config.toml.broken`, then replaced
+    /// - older than [`CONFIG_VERSION`], or missing keys that exist in the default
+    ///   -- merged in place, keeping every value and comment already present
     ///
-    /// The returned error (if any) is still reported to the caller, which may log
-    /// it; after regeneration the caller falls back to built-in defaults.
-    pub fn load(dir: &Path) -> Result<Self, ConfigError> {
+    /// The second element reports what happened, so the caller can log it.
+    /// A broken file still yields a usable config: refusing to boot would take
+    /// the whole server down over a typo.
+    ///
+    /// Idempotent. A current file that already has every key is only read.
+    pub fn load(dir: &Path) -> Result<(Self, ConfigMigration), LoadError> {
         let path = dir.join("config.toml");
 
-        if !path.exists() {
-            write_default(&path)?;
-            let raw = fs::read_to_string(&path).map_err(|e| ConfigError::Io(e.to_string()))?;
-            return Self::parse(&raw);
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            // Missing file: write the default and treat it as brand new.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                write_default(&path)?;
+                let raw = fs::read_to_string(&path).map_err(|e| LoadError::Io(e.to_string()))?;
+                let config = Self::parse(&raw).map_err(|e| LoadError::Io(e.to_string()))?;
+                return Ok((
+                    config,
+                    ConfigMigration::Written {
+                        from: 0,
+                        to: CONFIG_VERSION,
+                        added: 0,
+                    },
+                ));
+            }
+            Err(e) => return Err(LoadError::Io(e.to_string())),
+        };
+
+        // Parse before touching anything. A document that does not parse is never
+        // merged: a half-edited broken file is worse than a fresh, known-good one.
+        let broken = match Self::parse(&raw) {
+            Ok(config) => return Ok((config, Self::migrate(&path, &raw)?)),
+            Err(error) => error.to_string(),
+        };
+
+        let _ = fs::rename(&path, dir.join("config.toml.broken"));
+        write_default(&path)?;
+        let raw = fs::read_to_string(&path).map_err(|e| LoadError::Io(e.to_string()))?;
+        let config = Self::parse(&raw).map_err(|e| LoadError::Io(e.to_string()))?;
+        Ok((config, ConfigMigration::ReplacedBroken { detail: broken }))
+    }
+
+    /// Merges the default into `raw`, writing only if something was actually added.
+    ///
+    /// Only missing keys are inserted. Values, ordering, whitespace and comments
+    /// already in the file stay exactly as the operator wrote them, which is why
+    /// this edits a `toml_edit` document instead of re-serialising [`Config`].
+    ///
+    /// Returns [`ConfigMigration::UpToDate`] without touching the disk when the
+    /// file is already complete, so a normal start is a single read.
+    pub fn migrate(path: &Path, raw: &str) -> Result<ConfigMigration, LoadError> {
+        let mut document: toml_edit::DocumentMut = raw
+            .parse()
+            .map_err(|e: toml_edit::TomlError| LoadError::Io(e.to_string()))?;
+        let default: toml_edit::DocumentMut = DEFAULT_CONFIG
+            .parse()
+            .map_err(|e: toml_edit::TomlError| LoadError::Io(e.to_string()))?;
+
+        let from = document
+            .get(VERSION_KEY)
+            .and_then(toml_edit::Item::as_integer)
+            // A hand-written negative version must not wrap to a huge number.
+            .map_or(0, |v| u32::try_from(v).unwrap_or(0));
+
+        let mut added = 0;
+        fill_missing(document.as_table_mut(), default.as_table(), "", &mut added);
+
+        // Stamp the version only after every key is actually present.
+        if from < CONFIG_VERSION {
+            document[VERSION_KEY] = toml_edit::value(i64::from(CONFIG_VERSION));
         }
 
-        let raw = fs::read_to_string(&path).map_err(|e| ConfigError::Io(e.to_string()))?;
-        let config = Self::parse(&raw);
-
-        if let Err(error) = &config {
-            // Keep the operator's file for inspection before replacing it.
-            let _ = fs::rename(&path, dir.join("config.toml.broken"));
-            write_default(&path)?;
-            return Err(error.clone());
+        if added == 0 && from >= CONFIG_VERSION {
+            return Ok(ConfigMigration::UpToDate);
         }
 
-        config
+        write_atomic(path, document.to_string().as_bytes())?;
+        Ok(ConfigMigration::Written {
+            from,
+            to: CONFIG_VERSION,
+            added,
+        })
     }
 
     /// Parses config TOML, merging built-in messages back in per language.
@@ -293,8 +412,8 @@ impl Config {
     /// Writes the default config to `<dir>/config.toml`.
     ///
     /// Used on first run, and to repair a deleted or unparseable file.
-    pub fn write_default(dir: &Path) -> Result<(), ConfigError> {
-        fs::create_dir_all(dir).map_err(|e| ConfigError::Io(e.to_string()))?;
+    pub fn write_default(dir: &Path) -> Result<(), LoadError> {
+        fs::create_dir_all(dir).map_err(|e| LoadError::Io(e.to_string()))?;
         write_default(&dir.join("config.toml"))
     }
 
@@ -558,9 +677,108 @@ const MESSAGES_ID: &[(&str, &str)] = &[
     ),
 ];
 
-/// Writes [`DEFAULT_CONFIG`] to `path`.
-fn write_default(path: &Path) -> Result<(), ConfigError> {
-    fs::write(path, DEFAULT_CONFIG).map_err(|e| ConfigError::Io(e.to_string()))
+/// Recursively copies keys that `target` is missing out of `default`.
+///
+/// Nested tables are walked, so a `[premium]` block added in a later version
+/// lands inside the existing table instead of as a duplicate root key.
+///
+/// Every decision here favours the operator's file:
+/// - an existing value is never overwritten, even if it is wrong (sanitising is
+///   `parse`'s job, not the merge's)
+/// - an existing table is never replaced wholesale, only descended into
+/// - a value the operator deleted on purpose comes back, because `deny_unknown_fields`
+///   means a removed key is indistinguishable from an old one. Documented.
+///
+/// `path` is only used to name the section in the added-key comment.
+fn fill_missing(
+    target: &mut toml_edit::Table,
+    default: &toml_edit::Table,
+    path: &str,
+    added: &mut usize,
+) {
+    for (key, default_item) in default {
+        let key_path: String = if path.is_empty() {
+            key.to_string()
+        } else {
+            format!("{path}.{key}")
+        };
+
+        // The version is stamped by the caller, never merged from the default.
+        if key == VERSION_KEY {
+            continue;
+        }
+
+        // Messages are intentionally skipped. `Config::parse` already re-merges
+        // the built-in strings in memory, and a file using the legacy flat
+        // `[messages]` layout would break if `[messages.en]` were added next to
+        // it: TOML cannot hold both a scalar and a sub-table under one key.
+        if key == "messages" {
+            continue;
+        }
+
+        match target.get_mut(key) {
+            // Present: only descend when both sides are tables.
+            Some(existing) => {
+                if let (Some(existing_table), Some(default_table)) =
+                    (existing.as_table_mut(), default_item.as_table())
+                {
+                    fill_missing(existing_table, default_table, &key_path, added);
+                }
+                // Anything else is a scalar the operator owns already.
+            }
+            // Absent: insert the default, carrying the marker comment if there
+            // is one, so the new section still explains itself.
+            None => {
+                let mut item = default_item.clone();
+                // Only a value carries decoration; a sub-table does not.
+                if let (Some(value), Some(marker)) = (item.as_value_mut(), marker_for(default, key))
+                {
+                    value.decor_mut().set_prefix(marker);
+                }
+                target.insert(key, item);
+                *added += 1;
+            }
+        }
+    }
+}
+
+/// The `@pmcauto` marker block that precedes `key` in `table`, if any.
+///
+/// Used so a key inserted by a migration arrives with the operator-facing note
+/// that says what it does, instead of appearing with no explanation.
+fn marker_for(table: &toml_edit::Table, key: &str) -> Option<String> {
+    let prefix = table.key(key)?.leaf_decor().prefix()?.as_str()?;
+    if !prefix.contains(AUTO_MARKER) {
+        return None;
+    }
+    Some(prefix.to_string())
+}
+
+/// Writes `bytes` to `path` by way of a sibling temporary file plus a rename.
+///
+/// The same rule the user database follows: a crash mid-write can leave a stray
+/// `.tmp`, but it can never leave a half-written `config.toml` that then fails to
+/// parse on the next start.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), LoadError> {
+    // Append, do not replace the extension: `config.toml` would otherwise become
+    // `config.tmp`, which a `config.toml.broken` backup could never overwrite.
+    let tmp = path.with_file_name({
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(".tmp");
+        name
+    });
+
+    fs::write(&tmp, bytes).map_err(|e| LoadError::Io(format!("{}: {e}", tmp.display())))?;
+    fs::rename(&tmp, path).map_err(|e| {
+        // Best effort cleanup; the temp file is harmless if removal fails.
+        let _ = fs::remove_file(&tmp);
+        LoadError::Io(format!("{}: {e}", path.display()))
+    })
+}
+
+/// Writes [`DEFAULT_CONFIG`] to `path`, atomically.
+fn write_default(path: &Path) -> Result<(), LoadError> {
+    write_atomic(path, DEFAULT_CONFIG.as_bytes())
 }
 
 #[derive(Debug, Clone)]
@@ -811,16 +1029,348 @@ rate_limit_scope = "bogus""#
         );
     }
 
+    // --- config versioning and migration ----------------------------------
+
+    /// Writes `raw` to a fresh temp dir and returns the dir.
+    fn write_config(name: &str, raw: &str) -> PathBuf {
+        let dir = temp_dir(name);
+        std::fs::write(dir.join("config.toml"), raw).expect("write config");
+        dir
+    }
+
+    #[test]
+    fn a_config_without_a_version_is_migrated_and_stamped() {
+        // Exactly what 0.2.x wrote: no version key, no [premium] block.
+        let raw = r#"# my settings
+[general]
+database_file = "users.json"
+login_timeout_seconds = 60
+"#;
+        let dir = write_config("no-version", raw);
+
+        let (_config, migration) = Config::load(&dir).expect("load");
+
+        match migration {
+            ConfigMigration::Written { from, to, added } => {
+                assert_eq!(from, 0, "a missing version is version 0");
+                assert_eq!(to, CONFIG_VERSION);
+                assert!(added > 0, "the missing keys must be counted");
+            }
+            other => panic!("expected a write, got {other:?}"),
+        }
+
+        let migrated = std::fs::read_to_string(dir.join("config.toml")).expect("read");
+        assert!(
+            migrated.contains(&format!("config_version = {CONFIG_VERSION}")),
+            "the file must be stamped: {migrated}"
+        );
+        assert!(
+            migrated.contains("[premium]"),
+            "the newer section must be merged in: {migrated}"
+        );
+        // The operator's own comment and values survive.
+        assert!(migrated.contains("# my settings"));
+        assert!(migrated.contains("login_timeout_seconds = 60"));
+    }
+
+    #[test]
+    fn migration_keeps_every_value_the_operator_changed() {
+        let raw = r#"config_version = 1
+[general]
+login_timeout_seconds = 999
+min_password_length = 12
+"#;
+        let dir = write_config("keep-values", raw);
+
+        let (config, _) = Config::load(&dir).expect("load");
+
+        assert_eq!(
+            config.general.login_timeout_seconds, 999,
+            "the operator's value must win over the default"
+        );
+        assert_eq!(config.general.min_password_length, 12);
+
+        let migrated = std::fs::read_to_string(dir.join("config.toml")).expect("read");
+        assert!(migrated.contains("login_timeout_seconds = 999"));
+        assert!(migrated.contains("min_password_length = 12"));
+    }
+
+    #[test]
+    fn migration_fills_missing_keys_inside_an_existing_nested_table() {
+        // The table exists, but one of its keys was deleted. The key must come
+        // back inside that table, not as a stray root key.
+        let raw = r#"config_version = 1
+[general]
+login_timeout_seconds = 60
+
+[premium]
+enabled = true
+trust_online_mode = true
+"#;
+        let dir = write_config("nested", raw);
+
+        let (config, migration) = Config::load(&dir).expect("load");
+
+        assert!(migration.wrote(), "a missing nested key is a change");
+        assert!(
+            config.premium.enabled,
+            "the operator's value survives the merge"
+        );
+        assert!(
+            config.premium.require_claim,
+            "a deleted key is restored from the default"
+        );
+        assert_eq!(
+            config.general.login_timeout_seconds, 60,
+            "an untouched value is unchanged"
+        );
+
+        // And it really landed inside [premium], not at the root.
+        let migrated = std::fs::read_to_string(dir.join("config.toml")).expect("read");
+        let premium_section = migrated
+            .split("[premium]")
+            .nth(1)
+            .expect("premium section exists");
+        assert!(
+            premium_section.contains("require_claim"),
+            "the key must be inside [premium]: {migrated}"
+        );
+    }
+
+    #[test]
+    fn legacy_flat_messages_table_is_not_split_into_two_tables() {
+        // A pre-0.3 config has `[messages]` with plain strings. Injecting the
+        // default's `[messages.en]` next to it would produce a document that no
+        // longer parses, so the migration must descend into the existing table
+        // (where `login_success` etc. already live) instead.
+        let raw = r#"config_version = 1
+[messages]
+login_success = "Login berhasil versi lama"
+"#;
+        let dir = write_config("legacy-messages", raw);
+        let path = dir.join("config.toml");
+
+        let (config, _migration) = Config::load(&dir).expect("load");
+
+        // Still readable, and the operator's wording is intact.
+        assert_eq!(
+            config.message("login_success", "en"),
+            "Login berhasil versi lama"
+        );
+
+        // The result must round-trip as valid TOML.
+        let migrated = std::fs::read_to_string(&path).expect("read");
+        let reparsed: Config = toml::from_str(&migrated).expect("migrated file must stay valid");
+        assert_eq!(
+            reparsed.message("login_success", "en"),
+            "Login berhasil versi lama"
+        );
+    }
+
+    #[test]
+    fn migration_preserves_comments() {
+        let raw = r#"config_version = 1
+# This comment explains a deliberate choice.
+[general]
+# Another one, above a value.
+login_timeout_seconds = 30
+"#;
+        let dir = write_config("comments", raw);
+
+        let (_config, migration) = Config::load(&dir).expect("load");
+        assert!(migration.wrote());
+
+        let migrated = std::fs::read_to_string(dir.join("config.toml")).expect("read");
+        assert!(migrated.contains("# This comment explains a deliberate choice."));
+        assert!(migrated.contains("# Another one, above a value."));
+        assert!(migrated.contains("login_timeout_seconds = 30"));
+    }
+
+    #[test]
+    fn the_shipped_default_is_already_current() {
+        // Guards the release process: if someone adds a key to the default file
+        // without bumping CONFIG_VERSION (or forgets the version key entirely),
+        // the very first start would rewrite a file that is supposed to be final.
+        let dir = temp_dir("shipped-default");
+        std::fs::write(dir.join("config.toml"), DEFAULT_CONFIG).expect("write");
+
+        let (_config, migration) = Config::load(&dir).expect("load");
+
+        assert_eq!(
+            migration,
+            ConfigMigration::UpToDate,
+            "the shipped default must need no migration of its own"
+        );
+    }
+
+    #[test]
+    fn migration_output_reparses_as_a_valid_config() {
+        // The strongest single guarantee: whatever the merge produces must still
+        // be loadable, or the next start would treat it as broken.
+        let raw = r#"# operator notes
+[general]
+login_timeout_seconds = 45
+[premium]
+enabled = true
+trust_online_mode = true
+"#;
+        let dir = write_config("reparse", raw);
+
+        let (_config, migration) = Config::load(&dir).expect("load");
+        assert!(migration.wrote());
+
+        let migrated = std::fs::read_to_string(dir.join("config.toml")).expect("read");
+        let reparsed: Config =
+            toml::from_str(&migrated).expect("a migrated file must always parse");
+        assert_eq!(reparsed.general.login_timeout_seconds, 45);
+        assert!(reparsed.premium.enabled);
+        assert!(
+            reparsed.premium.require_claim,
+            "the restored key is present"
+        );
+
+        // And loading once more changes nothing.
+        let (_config, again) = Config::load(&dir).expect("reload");
+        assert_eq!(again, ConfigMigration::UpToDate);
+    }
+
+    #[test]
+    fn an_up_to_date_config_is_not_rewritten() {
+        // Load the shipped default once: it is complete and current.
+        let dir = temp_dir("up-to-date");
+        Config::load(&dir).expect("first load");
+        let path = dir.join("config.toml");
+        let before = std::fs::read_to_string(&path).expect("read");
+
+        let (_config, migration) = Config::load(&dir).expect("second load");
+
+        assert_eq!(
+            migration,
+            ConfigMigration::UpToDate,
+            "a complete config must not be rewritten"
+        );
+        assert!(
+            !migration.wrote(),
+            "nothing may touch the disk on a normal start"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            before,
+            "the file bytes must be identical"
+        );
+    }
+
+    #[test]
+    fn migration_is_idempotent_across_repeated_loads() {
+        // Start from an old file, then load it three more times.
+        let dir = write_config("idempotent", "[general]\nlogin_timeout_seconds = 42\n");
+
+        Config::load(&dir).expect("first load migrates");
+        let after_first = std::fs::read_to_string(dir.join("config.toml")).expect("read");
+
+        for _ in 0..3 {
+            let (_config, migration) = Config::load(&dir).expect("reload");
+            assert_eq!(
+                migration,
+                ConfigMigration::UpToDate,
+                "only the first load may write"
+            );
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).expect("read"),
+            after_first,
+            "repeated loads must not keep changing the file"
+        );
+    }
+
+    #[test]
+    fn an_invalid_file_is_replaced_and_never_merged() {
+        let dir = write_config("invalid", "this is not toml [[[");
+        let path = dir.join("config.toml");
+
+        let (_config, migration) = Config::load(&dir).expect("a usable config is still returned");
+
+        assert!(
+            matches!(migration, ConfigMigration::ReplacedBroken { .. }),
+            "the caller must be told: {migration:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml.broken")).expect("backup"),
+            "this is not toml [[[",
+            "the broken file is preserved"
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("rewritten")
+                .contains("config_version"),
+            "the replacement is a current default"
+        );
+    }
+
+    #[test]
+    fn a_future_version_is_never_downgraded() {
+        // A file written by a newer plugin may still be missing keys this build
+        // knows about; filling them is fine. Overwriting its version with an older
+        // one is not, because that would trigger a pointless rewrite next start.
+        let future = CONFIG_VERSION + 1;
+        let dir = write_config(
+            "future",
+            &format!("config_version = {future}\n[general]\nlogin_timeout_seconds = 60\n"),
+        );
+
+        let (_config, _migration) = Config::load(&dir).expect("load");
+
+        let migrated = std::fs::read_to_string(dir.join("config.toml")).expect("read");
+        assert!(
+            migrated.contains(&format!("config_version = {future}")),
+            "the newer version must be preserved: {migrated}"
+        );
+    }
+
+    #[test]
+    fn a_complete_future_version_file_is_left_untouched() {
+        let future = CONFIG_VERSION + 1;
+        let mut raw = DEFAULT_CONFIG.replace(
+            &format!("config_version = {CONFIG_VERSION}"),
+            &format!("config_version = {future}"),
+        );
+        assert!(
+            raw.contains(&future.to_string()),
+            "the test setup must work"
+        );
+
+        let dir = write_config("future-complete", &raw);
+        let before = std::fs::read_to_string(dir.join("config.toml")).expect("read");
+        raw.clear();
+
+        let (_config, migration) = Config::load(&dir).expect("load");
+
+        assert_eq!(
+            migration,
+            ConfigMigration::UpToDate,
+            "a complete newer file must not be rewritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).expect("read"),
+            before
+        );
+    }
+
     #[test]
     fn load_regenerates_a_missing_config() {
         let dir = temp_dir("missing");
         let path = dir.join("config.toml");
         assert!(!path.exists());
 
-        let config = Config::load(&dir).expect("load writes and parses the default");
+        let (config, migration) = Config::load(&dir).expect("load writes and parses the default");
 
         assert!(path.exists(), "a deleted config must be recreated");
         assert_eq!(config.general.database_file, "users.json");
+        assert!(
+            migration.wrote(),
+            "a fresh file is reported as written, not as up to date"
+        );
 
         // Deleting it again after the directory already exists must also work.
         std::fs::remove_file(&path).expect("remove");
@@ -837,11 +1387,11 @@ rate_limit_scope = "bogus""#
         let path = dir.join("config.toml");
         std::fs::write(&path, "this is not toml [[[").expect("write");
 
-        let result = Config::load(&dir);
+        let (_config, migration) = Config::load(&dir).expect("a broken file still yields a config");
 
         assert!(
-            result.is_err(),
-            "the operator must still be told it was broken"
+            matches!(migration, ConfigMigration::ReplacedBroken { .. }),
+            "the operator must be told the file was broken: {migration:?}"
         );
         let recovered = std::fs::read_to_string(&path).expect("config rewritten");
         assert!(

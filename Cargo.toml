@@ -41,6 +41,11 @@ tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+# Format- and comment-preserving TOML editing, for config migration.
+#
+# Already in the tree: `toml` 0.8 depends on it (Cargo.lock), so this adds no
+# crate to the binary -- it only makes the existing one a direct dependency.
+toml_edit = "0.22"
 # Argon2id. Pure Rust, so it cross-compiles to wasm32-wasip2 without a C toolchain.
 argon2 = "0.6"
 

@@ -81,7 +81,10 @@ impl Plugin for PmcAuth {
         }
 
         let config = match Config::load(dir) {
-            Ok(config) => config,
+            Ok((config, migration)) => {
+                report_config_migration(&migration);
+                config
+            }
             Err(e) => {
                 // Booting with defaults beats refusing to start, but the operator
                 // must be able to see why their settings are being ignored.
@@ -124,6 +127,30 @@ impl Plugin for PmcAuth {
             info!("PMCAuth unloaded.");
         }
         Ok(())
+    }
+}
+
+/// Reports what the config load did to the file, if anything.
+///
+/// Nothing is logged when the file was already current: a normal start stays
+/// quiet, which is what makes a migration line meaningful when it does appear.
+fn report_config_migration(migration: &crate::config::ConfigMigration) {
+    use crate::config::ConfigMigration;
+
+    match migration {
+        ConfigMigration::UpToDate => {}
+        ConfigMigration::Written { from, to, added } => {
+            info!(
+                "PMCAuth: config.toml migrated (version {from} -> {to}, {added} key(s) added); \
+                 existing values and comments were kept."
+            );
+        }
+        ConfigMigration::ReplacedBroken { detail } => {
+            warn!(
+                "PMCAuth: config.toml could not be parsed ({detail}); it was kept as \
+                 config.toml.broken and replaced with a working default."
+            );
+        }
     }
 }
 

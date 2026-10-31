@@ -1,6 +1,15 @@
 # PMCAuth configuration.
 # This file is written to <server>/plugins/data/PMCAuth/config.toml on first run.
 # Delete it to regenerate, or edit and restart the server.
+#
+# Settings added by a newer plugin version are merged into this file on startup.
+# Existing values are never overwritten, and comments are kept. The automatic
+# merge only adds keys your file is missing; it never edits a value you wrote.
+#
+# Written by PMCAuth. Compared against the plugin's built-in version on start;
+# a lower number triggers the merge described above. Leave it alone.
+# @pmcauto
+config_version = 1
 
 [general]
 # User database file, relative to the plugin data folder.

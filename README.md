@@ -8,11 +8,12 @@ JSON file inside the plugin's private data folder; passwords are Argon2id hashes
 
 ## Status
 
-- `cargo build --release` passes, artefact `target/wasm32-wasip2/release/pmc_auth.wasm` (993 KiB / 1,016,736 bytes).
-- `cargo test --target x86_64-unknown-linux-gnu` — 79 tests pass.
+- `cargo build --release` passes, artefact `target/wasm32-wasip2/release/pmc_auth.wasm` (1,027 KiB / 1,051,429 bytes).
+- `cargo test --target x86_64-unknown-linux-gnu` — 91 tests pass.
 - `cargo clippy --all-targets --all-features -- -D warnings` is clean.
 - Pinned to a `pumpkin-plugin-api` git rev (WIT `pumpkin:plugin@0.1.0`); see `Cargo.toml`.
-- 0.3.0 adds optional premium login (off by default) and storage schema v2.
+- 0.3.0 adds optional premium login (off by default), storage schema v2 and
+  [versioned config migration](#config-versioning-and-migration).
   See [Premium (Mojang) login](#premium-mojang-login) and
   [Premium login: risks and limits](#premium-login-risks-and-limits).
 
@@ -119,14 +120,72 @@ On first start the plugin creates:
 └── config.toml.broken  # only if an unparseable config was replaced
 ```
 
-`config.toml` is regenerated automatically: delete it and the next start writes a
+`config.toml` is repaired automatically. Delete it and the next start writes a
 fresh default. If the file exists but cannot be parsed, it is renamed to
 `config.toml.broken` and a working default is written in its place, so a typo
-never leaves the plugin running on invisible settings. The parse error is still
-logged, and the active settings fall back to built-in defaults for that run.
+never leaves the plugin running on invisible settings. The parse error is logged,
+and the active settings fall back to built-in defaults for that run.
 
 The plugin requests `fs.read.data` and `fs.write.data`. Without those permissions
 the host does not preopen the data folder and the plugin cannot start.
+
+## Config versioning and migration
+
+Every `config.toml` carries an explicit `config_version` at the top:
+
+```toml
+# @pmcauto
+config_version = 1
+```
+
+On start the plugin compares that number with its own `CONFIG_VERSION`
+([`src/config.rs`](src/config.rs:20)) and merges in any default key the file is
+missing. A file without the key counts as version 0, which is every config
+written before this mechanism existed.
+
+### What the merge guarantees
+
+| Behaviour | Detail |
+|---|---|
+| Never overwrites a value | Your numbers, strings and booleans win, even when they look wrong. Sanitising bad values is a separate step and does not touch the file. |
+| Adds only missing keys | Including nested ones: a missing `require_claim` lands inside your existing `[premium]` table, not as a stray root key. |
+| Keeps comments and formatting | The file is edited with `toml_edit`, so comments, ordering and blank lines survive. Nothing is re-serialised from the struct. |
+| Copies the marker comment | A key introduced with `@pmcauto` above it in the default file arrives with that comment, so new sections explain themselves. |
+| Writes atomically | `<file>.tmp` then rename. A crash mid-write cannot leave a half-written config that fails to parse next start. |
+| Idempotent | A complete, current file is only read. The log stays silent and the bytes on disk are unchanged. |
+| Leaves newer files alone | A `config_version` above the plugin's own is never downgraded. |
+| Never merges a broken file | Unparseable input goes to `config.toml.broken` and is replaced, rather than being half-edited. |
+
+The one deliberate loss: a key you deleted on purpose comes back, because a
+deleted key is indistinguishable from one added by a newer version. Redundant
+message keys are exempt -- they are merged in memory by
+[`Config::parse`](src/config.rs:383) instead, so the file itself is never forced to
+carry all of them.
+
+### Log lines
+
+```text
+PMCAuth: config.toml migrated (version 0 -> 1, 24 key(s) added); existing values and comments were kept.
+PMCAuth: config.toml could not be parsed (…); it was kept as config.toml.broken and replaced with a working default.
+```
+
+A normal start prints neither.
+
+### Adding a setting (for maintainers)
+
+1. Add the key to [`config.default.toml`](config.default.toml:1) with a comment.
+2. Add the field to the matching struct in [`src/config.rs`](src/config.rs:1).
+3. Bump [`CONFIG_VERSION`](src/config.rs:16) by one.
+4. `cargo test` -- `the_shipped_default_is_already_current` fails if step 3 is
+   skipped, so the mistake cannot ship.
+
+**Downgrading is not automatic.** Every config struct is
+`#[serde(default, deny_unknown_fields)]`, so an older build treats a key it does
+not know as a parse error: it will move your file to `config.toml.broken` and start
+from defaults. That is fail-closed, not data loss, but it does discard your
+settings. Before downgrading, keep a copy of `config.toml`; afterwards, delete the
+keys the older build does not recognise (everything added by the newer version)
+and restore your values.
 
 ## Languages
 
@@ -461,33 +520,45 @@ a plugin-side redaction becomes possible and this note is obsolete.
 16. Corrupt `users.json` deliberately (`echo garbage > users.json`) → plugin logs the
     parse error and refuses to start rather than wiping accounts.
 
+### Config migration
+
+17. **Older config.** Use a `config.toml` from 0.2.x (no `config_version`, no
+    `[premium]`). Start → the log names `version 0 -> 1`, the file gains the new
+    keys, your own values and comments are unchanged.
+18. **No rewrite on a normal start.** Start again → no migration line, and the file's
+    modification time does not change.
+19. **Deleted key.** Remove `require_claim` from `[premium]` and restart → it comes
+    back inside `[premium]` (not at the top of the file), your other values are kept.
+20. **Broken file.** `echo 'not toml [[[' > config.toml` → the file becomes
+    `config.toml.broken`, a fresh default is written, and the plugin still loads.
+
 ### Premium login
 
-Run 17–20 first: they prove the feature is inert by default.
+Run 21–24 first: they prove the feature is inert by default.
 
-17. **Default install.** `premium.enabled = false`. Join, play, relog: behaviour is
+21. **Default install.** `premium.enabled = false`. Join, play, relog: behaviour is
     identical to 0.2.x, and the log says premium login is disabled.
-18. **Upgrade with existing accounts.** Start 0.3.0 against a 0.2.x `users.json`.
-    Accounts load, `/login` works normally, and the file becomes
+22. **Upgrade with existing accounts.** Start this build against a 0.2.x
+    `users.json`. Accounts load, `/login` works normally, and the file becomes
     `"schema_version": 2` after the next write. No account is lost.
-19. **Misconfiguration is refused.** On a direct offline server set `enabled = true`,
+23. **Misconfiguration is refused.** On a direct offline server set `enabled = true`,
     `trust_online_mode = false`, `trust_forwarded_profile = true`. Then `/premium`
     → refused (`premium_needs_profile`); `/authadmin premium set` → refused; the log
     warns that no auto-login can happen. Verify this before trusting the feature.
-20. **Cracked path unchanged.** With `enabled = true` and an unlinked account, the
+24. **Cracked path unchanged.** With `enabled = true` and an unlinked account, the
     player still gets the login prompt and `/login` works exactly as before.
-21. **Premium success auto-login.** Behind the proxy: log in, `/premium`, relog →
+25. **Premium success auto-login.** Behind the proxy: log in, `/premium`, relog →
     unfrozen, `premium_login_success`, no password prompt, no login timeout.
-22. **UUID mismatch falls back.** Stop the server, edit `premium_uuid` in
+26. **UUID mismatch falls back.** Stop the server, edit `premium_uuid` in
     `users.json` to a wrong value → relog gives the normal password prompt.
-23. **Anchor unavailable falls back.** With `trust_online_mode = true` but the server
+27. **Anchor unavailable falls back.** With `trust_online_mode = true` but the server
     in offline mode, a linked account still gets the password prompt.
-24. **`/premium off`.** Run it, relog → password prompt again. `/premium status`
+28. **`/premium off`.** Run it, relog → password prompt again. `/premium status`
     reports not linked. `/authadmin premium set <player>` re-links an online player.
-25. **Name reservation.** With an account premium-linked, try `/register` with that
+29. **Name reservation.** With an account premium-linked, try `/register` with that
     name from another client → `premium_name_blocked`. Set
     `block_linked_names = false` → the block disappears.
-26. **Restart durability.** Restart the server and run `/premium status` → the link
+30. **Restart durability.** Restart the server and run `/premium status` → the link
     is still there and auto-login still works.
 
 ## Premium login: risks and limits
