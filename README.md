@@ -86,17 +86,18 @@ No WASI SDK is required: nothing in the dependency tree compiles C.
 
 ## Releases
 
-A GitHub Release is created automatically for any branch named `vMAJOR.MINOR.PATCH`:
+A GitHub Release is created automatically when a tag named `vMAJOR.MINOR.PATCH` is pushed:
 
 ```bash
-git checkout -b v0.2.2
-git push -u origin v0.2.2
+git tag -a v0.2.2 -m "v0.2.2"
+git push origin v0.2.2
 ```
 
-- Creating the branch or pushing to it both trigger [`.github/workflows/release.yml`](.github/workflows/release.yml:1); the workflow is idempotent, so the second event and any rerun skip if the release already exists.
-- The release is named `v0.2.2` and tagged `v0.2.2` at the branch HEAD.
-- The body lists commits since the previous version tag, or the full history for the first release, as `- <short hash> <subject>`.
-- Branches matching `v*` that are not exactly `vX.Y.Z` (for example `vendor-fix`) are ignored with a warning.
+- Only tags trigger [`.github/workflows/release.yml`](.github/workflows/release.yml:1). Branch pushes, including `v*` branches, do not.
+- The release is named `v0.2.2` and attached to the existing `v0.2.2` tag.
+- The body lists commits since the previous reachable version tag, or the full history for the first release, as `- <short hash> <subject>`.
+- Tags matching `v*` that are not exactly `vX.Y.Z` (for example `v0.2`, `v0.2.2-beta`, or `vendor-fix`) are ignored with a warning.
+- Pushing an already-released tag again, or rerunning the workflow, skips instead of creating a duplicate release.
 
 ## Install
 

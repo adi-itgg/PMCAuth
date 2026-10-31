@@ -1,19 +1,18 @@
 name: Release
 
-# Two ways to trigger: creating a version branch, or pushing to one that already exists.
-# `create` cannot be filtered by name, so the version pattern is enforced in the job.
+# Tags only. `v*` also matches things like `vendor-fix` or `v0.2.2-beta`,
+# so the exact version shape is enforced in the job before anything is created.
 on:
-  create:
   push:
-    branches: ['v*']
+    tags: ['v*']
 
 permissions:
   contents: write
 
-# Both events for the same branch land in one group, so a create+push pair or a
-# rerun serialises instead of racing. Not cancelling: a release run should finish.
+# One group per tag, so a manual rerun of the same tag serialises instead of
+# racing. Not cancelling: a release run should finish.
 concurrency:
-  group: release-${{ github.event_name == 'create' && github.event.ref || github.ref_name }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -25,43 +24,23 @@ jobs:
         id: version
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          CREATE_REF: ${{ github.event.ref }}
-          CREATE_REF_TYPE: ${{ github.event.ref_type }}
-          PUSH_REF_NAME: ${{ github.ref_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = "create" ]; then
-            ref_type="$CREATE_REF_TYPE"
-            branch="$CREATE_REF"
-          else
-            ref_type="branch"
-            branch="$PUSH_REF_NAME"
-          fi
-
-          # `create` also fires for tags; only branches make a release.
-          if [ "$ref_type" != "branch" ]; then
-            echo "::notice::Ref type is '$ref_type', not a branch. Skipping."
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::warning::Tag '$TAG' is not vMAJOR.MINOR.PATCH. Skipping release."
             echo "valid=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
-          # v* also matches branches like `vendor-fix`, so validate before releasing.
-          if ! [[ "$branch" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::warning::Branch '$branch' is not vMAJOR.MINOR.PATCH. Skipping release."
-            echo "valid=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           echo "valid=true" >> "$GITHUB_OUTPUT"
-          echo "version=$branch" >> "$GITHUB_OUTPUT"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout version branch
+      - name: Checkout tagged commit
         if: steps.version.outputs.valid == 'true'
         uses: actions/checkout@v4
         with:
-          # On `create` GITHUB_REF is not the new branch, so take it from the payload.
-          ref: ${{ github.event_name == 'create' && github.event.ref || github.ref_name }}
+          ref: ${{ github.ref_name }}
+          # All tags on the checkout, so the previous version can be found below.
           fetch-depth: 0
           fetch-tags: true
 
@@ -88,7 +67,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          # Highest previous version tag reachable from HEAD, excluding the version being released.
+          # Highest previous version tag reachable from HEAD, excluding the tag being released.
           previous="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --merged HEAD --sort=-v:refname \
             | grep -vx "$VERSION" | head -n1 || true)"
 
@@ -113,11 +92,6 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          args=(--title "$VERSION" --notes-file release-notes.md)
-          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
-            # Tag already points somewhere; release it as-is instead of moving it.
-            echo "::notice::Tag $VERSION already exists. Attaching release to it."
-          else
-            args+=(--target "$VERSION")
-          fi
-          gh release create "$VERSION" "${args[@]}"
+          # No --target: the tag is already created and points at the commit that
+          # triggered this run. Passing it would only risk moving the ref.
+          gh release create "$VERSION" --title "$VERSION" --notes-file release-notes.md
