@@ -84,6 +84,20 @@ No WASI SDK is required: nothing in the dependency tree compiles C.
 `.cargo/config.toml` already pins `target = "wasm32-wasip2"`, so plain
 `cargo build --release` produces the plugin.
 
+## Releases
+
+A GitHub Release is created automatically for any branch named `vMAJOR.MINOR.PATCH`:
+
+```bash
+git checkout -b v0.2.2
+git push -u origin v0.2.2
+```
+
+- Creating the branch or pushing to it both trigger [`.github/workflows/release.yml`](.github/workflows/release.yml:1); the workflow is idempotent, so the second event and any rerun skip if the release already exists.
+- The release is named `v0.2.2` and tagged `v0.2.2` at the branch HEAD.
+- The body lists commits since the previous version tag, or the full history for the first release, as `- <short hash> <subject>`.
+- Branches matching `v*` that are not exactly `vX.Y.Z` (for example `vendor-fix`) are ignored with a warning.
+
 ## Install
 
 ```bash
