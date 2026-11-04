@@ -245,6 +245,20 @@ fn tick(state: &AuthState, server: &Server) {
         }
     }
 
+    // --- anchor hold ---
+    // A Bedrock client predicts its own movement, and the host ignores
+    // `is_movement_locked` on that path, so an unauthenticated player is pulled
+    // back to the anchor instead. Only players with an anchor are touched: that
+    // map is seeded at join and dropped on success, `/logout`, and leave, so
+    // Java players and authenticated players cost one hashmap miss per tick.
+    for uuid in state.anchored_uuids() {
+        let Some(player) = find_player_by_uuid(server, &uuid) else {
+            state.clear_anchor(&uuid);
+            continue;
+        };
+        crate::events::bedrock_freeze::hold(state, &player);
+    }
+
     // --- reminders ---
     if config.general.reminder_interval_seconds > 0 {
         for (uuid, _) in state.due_reminders(now) {

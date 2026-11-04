@@ -31,11 +31,23 @@ crate-type = ["cdylib"]
 #    type-checking export func `handle-event`"
 # (Not a v0.2-async symptom, despite the identical wording.)
 #
-# Pinned to the 26.60 protocol commit, which is what `0.2.1+26.3-26.60` servers
-# build from. Its crates/pumpkin-plugin-wit/v0.1 is identical to canary and
-# nightly HEAD as of 2026-10-31, so this rev also covers the latest servers.
-# Re-pin whenever the server's protocol version moves.
-pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin", rev = "f2cff8e6507a752e219a811d7aca58a8f005b1a2" }
+# Pinned to the rev whose v0.1 WIT is byte-identical to the deployed server's
+# `crates/pumpkin-plugin-wit/v0.1`. That server is the adi-itgg/PumpkinMC fork,
+# and its bedrock-packets.wit LACKS five fields that upstream 26.60 added
+# (`hand` on s-animate/s-player-auth-input, `has-passenger-block-data` twice,
+# `editor-level-migration-version`). Those reach the `event` type through
+# packet-received-event-data -> serverbound-packet -> s-animate, so the type
+# hash changes and the host reports:
+#   "Plugin was built against a different iteration of the API:
+#    type-checking export func `handle-event`"
+# `6458950` matches that fork's v0.1 exactly (verified with `diff -rq` on all
+# WIT files). It still ships forms.wit, `open-form`, and
+# bedrock-form-response-event, so the Bedrock login form works.
+#
+# Do NOT bump this to upstream master without checking the deployed server's
+# WIT. A newer pin loads fine against upstream builds and fails against this
+# fork, with the identical message.
+pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin", rev = "645895098fcea9fcfc6fb21445520491d364dcb0" }
 tracing = "0.1"
 # Config file (TOML) and user database (JSON) serialization.
 serde = { version = "1", features = ["derive"] }

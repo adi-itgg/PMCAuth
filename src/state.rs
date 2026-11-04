@@ -35,6 +35,12 @@ pub struct AuthState {
     store: Mutex<Box<dyn UserStore>>,
     /// Keyed by UUID string.
     sessions: Mutex<HashMap<String, LoginSession>>,
+    /// UUID -> position the server holds while the player is unauthenticated.
+    ///
+    /// The Bedrock client predicts its own movement, so refusing its input
+    /// packets is not enough; the server has to pull it back. This is the point
+    /// it is pulled back to. Dropped together with the session.
+    bedrock_anchors: Mutex<HashMap<String, (f64, f64, f64)>>,
     /// Authenticated players, keyed by UUID string.
     authenticated: Mutex<HashMap<String, ()>>,
     /// Client IP -> session expiry (unix seconds).
@@ -60,6 +66,7 @@ impl AuthState {
             config,
             store: Mutex::new(Box::new(store)),
             sessions: Mutex::new(HashMap::new()),
+            bedrock_anchors: Mutex::new(HashMap::new()),
             authenticated: Mutex::new(HashMap::new()),
             ip_sessions: Mutex::new(HashMap::new()),
             lockouts: Mutex::new(HashMap::new()),
@@ -201,7 +208,56 @@ impl AuthState {
             .sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The anchor is only meaningful while the session is pending, and it is
+        // read from `attempt` inside the packet guard, so dropping it here stops
+        // the anchor map from outliving the login window.
+        self.bedrock_anchors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(uuid);
         guard.remove(uuid)
+    }
+
+    // --- Bedrock movement anchor ------------------------------------------
+
+    /// Every player currently being held at an anchor.
+    pub fn anchored_uuids(&self) -> Vec<String> {
+        let guard = self
+            .bedrock_anchors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.keys().cloned().collect()
+    }
+
+    /// The position an unauthenticated Bedrock player is held at, if recorded.
+    pub fn anchor(&self, uuid: &str) -> Option<(f64, f64, f64)> {
+        let guard = self
+            .bedrock_anchors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.get(uuid).copied()
+    }
+
+    /// Drops the anchor. Called once the player is authenticated or has left.
+    pub fn clear_anchor(&self, uuid: &str) {
+        let mut guard = self
+            .bedrock_anchors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.remove(uuid);
+    }
+
+    /// Records the position to hold a player at. Called at join, and again on
+    /// respawn.
+    pub fn set_anchor(&self, uuid: &str, position: (f64, f64, f64)) {
+        if !position.0.is_finite() || !position.1.is_finite() || !position.2.is_finite() {
+            return;
+        }
+        let mut guard = self
+            .bedrock_anchors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.insert(uuid.to_string(), position);
     }
 
     /// UUIDs of players whose login deadline has passed.
@@ -479,6 +535,29 @@ mod tests {
         assert_eq!(session.next_reminder, 110);
         assert!(state.remove_session("uuid-1").is_some());
         assert!(state.session("uuid-1").is_none());
+    }
+
+    #[test]
+    fn bedrock_anchor_is_dropped_with_the_session() {
+        // The anchor only exists to hold an unauthenticated Bedrock player in
+        // place. Leaving it behind would keep a position for a player who has
+        // logged in or disconnected.
+        let state = state();
+        state.create_session("uuid-1", "1.2.3.4", 100, 60, 10);
+        state.set_anchor("uuid-1", (1.0, 64.0, 2.0));
+        assert_eq!(state.anchor("uuid-1"), Some((1.0, 64.0, 2.0)));
+
+        state.remove_session("uuid-1");
+        assert_eq!(state.anchor("uuid-1"), None);
+    }
+
+    #[test]
+    fn bedrock_anchor_rejects_non_finite_positions() {
+        // A NaN would make every drift comparison false, silently disabling the
+        // pull-back instead of failing loudly.
+        let state = state();
+        state.set_anchor("uuid-1", (f64::NAN, 64.0, 0.0));
+        assert_eq!(state.anchor("uuid-1"), None);
     }
 
     #[test]

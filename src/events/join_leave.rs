@@ -86,6 +86,10 @@ fn authenticate_on_join(state: &AuthState, server: &Server, player: &Player) {
     );
 
     player.set_movement_locked(true);
+    // Seed the anchor now, while the server still owns the spawn position. It
+    // must never come from a movement packet: the client has already been
+    // drifting during its loading screen by the time the first one arrives.
+    crate::events::bedrock_freeze::set_anchor(state, player);
     crate::events::send_prompt(state, player);
 }
 
@@ -98,6 +102,12 @@ impl EventHandler<PlayerLeaveEvent> for LeaveHandler {
         event: EventData<PlayerLeaveEvent>,
     ) -> EventData<PlayerLeaveEvent> {
         let uuid = event.player.get_id().to_string();
+
+        // A player who left while still unauthenticated is returned to its
+        // anchor first, so the position that gets saved is the one it was held
+        // at rather than wherever the client had wandered. `remove_session`
+        // drops the anchor itself, so this has to happen before it.
+        crate::events::bedrock_freeze::snap_to_anchor(&self.0, &event.player);
 
         // A player who left while still unauthenticated must not keep a session
         // entry, otherwise the timeout task would try to kick a ghost.

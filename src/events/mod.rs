@@ -3,6 +3,7 @@
 //! Two groups: lifecycle (join/leave) and the "not logged in" guards that cancel
 //! whatever the frozen player tries to do.
 
+pub mod bedrock_freeze;
 pub mod guard;
 pub mod join_leave;
 
@@ -28,6 +29,16 @@ pub fn register(context: &Context, state: Arc<AuthState>) -> pumpkin_plugin_api:
         true,
     )?;
 
+    // `set_movement_locked` is ignored on the Bedrock path by the host, and the
+    // Bedrock movement packet is never decoded, so the hold is anchor + teleport
+    // instead of packet interception. The tick calls `bedrock_freeze::hold`;
+    // this handler only keeps the anchor valid across a respawn.
+    context.register_event_handler(
+        bedrock_freeze::RespawnAnchorGuard(state.clone()),
+        EventPriority::Highest,
+        true,
+    )?;
+
     guard::register_all(context, state)?;
     Ok(())
 }
@@ -39,6 +50,11 @@ pub fn register(context: &Context, state: Arc<AuthState>) -> pumpkin_plugin_api:
 /// sending here as well made the player see "Login berhasil" twice.
 pub fn on_authenticated(state: &AuthState, player: &Player) {
     let uuid = player.get_id().to_string();
+
+    // Return the player to where it was held before releasing it. Any drift
+    // accumulated during the login window is discarded here rather than carried
+    // into play. This must run before `remove_session`, which drops the anchor.
+    bedrock_freeze::snap_to_anchor(state, player);
 
     state.remove_session(&uuid);
     state.set_authenticated(&uuid);
@@ -64,6 +80,9 @@ pub fn on_deauthenticated(state: &AuthState, player: &Player) {
     );
 
     player.set_movement_locked(true);
+    // `/logout` re-freezes, so it needs its own anchor: the join-time one was
+    // dropped by `on_authenticated` when the player logged in.
+    bedrock_freeze::set_anchor(state, player);
     send_prompt(state, player);
 }
 
